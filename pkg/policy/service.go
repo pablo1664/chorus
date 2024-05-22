@@ -68,6 +68,12 @@ local prev = redis.call("hget", KEYS[1], ARGV[1])
 if not prev or unixtime(prev) < unixtime(ARGV[2]) then return redis.call("hset", KEYS[1], ARGV[1],ARGV[2]) else return 0 end`)
 )
 
+const (
+	routingBlock = "-"
+)
+
+var ErrBlock = errors.New("Blocked")
+
 type ReplicationSwitch struct {
 	IsDone       bool          `redis:"IsDone"`
 	OldMain      string        `redis:"OldMain"`
@@ -130,21 +136,45 @@ const (
 
 type ReplicationPolicyStatusExtended struct {
 	ReplicationPolicyStatus
-	User   string
-	Bucket string
-	From   string
-	To     string
+	User     string
+	Bucket   string
+	From     string
+	To       string
+	ToBucket *string
 }
 
 type ReplicationPolicies struct {
 	From string
-	To   map[string]tasks.Priority
+	To   []ReplicationDest
+}
+
+func (r ReplicationPolicies) GetPriority(stor string, bucket *string) tasks.Priority {
+	for _, d := range r.To {
+		if d.Storage != stor {
+			continue
+		}
+		if bucket == d.Bucket {
+			return d.Priority
+		}
+		if bucket != nil && d.Bucket != nil && *bucket == *d.Bucket {
+			return d.Priority
+		}
+	}
+	return tasks.PriorityDefault1
+}
+
+type ReplicationDest struct {
+	Priority tasks.Priority
+	Storage  string
+	Bucket   *string // todo: move bucket name to key!
 }
 
 type Service interface {
 	GetRoutingPolicy(ctx context.Context, user, bucket string) (string, error)
 	getBucketRoutingPolicy(ctx context.Context, user, bucket string) (string, error)
 	addBucketRoutingPolicy(ctx context.Context, user, bucket, toStorage string) error
+	addBucketRoutingPolicyBlock(ctx context.Context, user, bucket string) error
+	deleteBucketRoutingPolicy(ctx context.Context, user, bucket string) error
 	GetUserRoutingPolicy(ctx context.Context, user string) (string, error)
 	AddUserRoutingPolicy(ctx context.Context, user, toStorage string) error
 
@@ -158,20 +188,20 @@ type Service interface {
 	AddUserReplicationPolicy(ctx context.Context, user string, from string, to string, priority tasks.Priority) error
 	DeleteUserReplication(ctx context.Context, user string, from string, to string) error
 
-	AddBucketReplicationPolicy(ctx context.Context, user, bucket, from string, to string, priority tasks.Priority, agentURL *string) error
-	GetReplicationPolicyInfo(ctx context.Context, user, bucket, from, to string) (ReplicationPolicyStatus, error)
+	AddBucketReplicationPolicy(ctx context.Context, user, bucket, from string, to string, priority tasks.Priority, agentURL *string, toBucket *string) error
+	GetReplicationPolicyInfo(ctx context.Context, user, bucket, from, to string, toBucket *string) (ReplicationPolicyStatus, error)
 	ListReplicationPolicyInfo(ctx context.Context) ([]ReplicationPolicyStatusExtended, error)
-	IsReplicationPolicyExists(ctx context.Context, user, bucket, from, to string) (bool, error)
-	IsReplicationPolicyPaused(ctx context.Context, user, bucket, from, to string) (bool, error)
-	IncReplInitObjListed(ctx context.Context, user, bucket, from, to string, bytes int64, eventTime time.Time) error
-	IncReplInitObjDone(ctx context.Context, user, bucket, from, to string, bytes int64, eventTime time.Time) error
-	ObjListStarted(ctx context.Context, user, bucket, from, to string) error
-	IncReplEvents(ctx context.Context, user, bucket, from, to string, eventTime time.Time) error
-	IncReplEventsDone(ctx context.Context, user, bucket, from, to string, eventTime time.Time) error
+	IsReplicationPolicyExists(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error)
+	IsReplicationPolicyPaused(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error)
+	IncReplInitObjListed(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error
+	IncReplInitObjDone(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error
+	ObjListStarted(ctx context.Context, user, bucket, from, to string, toBucket *string) error
+	IncReplEvents(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error
+	IncReplEventsDone(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error
 
-	PauseReplication(ctx context.Context, user, bucket, from string, to string) error
-	ResumeReplication(ctx context.Context, user, bucket, from string, to string) error
-	DeleteReplication(ctx context.Context, user, bucket, from string, to string) error
+	PauseReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error
+	ResumeReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error
+	DeleteReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error
 	DeleteBucketReplicationsByUser(ctx context.Context, user, from string, to string) ([]string, error)
 }
 
@@ -183,7 +213,7 @@ type policySvc struct {
 	client *redis.Client
 }
 
-func (s *policySvc) ObjListStarted(ctx context.Context, user, bucket, from, to string) error {
+func (s *policySvc) ObjListStarted(ctx context.Context, user, bucket, from, to string, toBucket *string) error {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -197,6 +227,9 @@ func (s *policySvc) ObjListStarted(ctx context.Context, user, bucket, from, to s
 		return fmt.Errorf("%w: to is required to get replication policy status", dom.ErrInvalidArg)
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	return s.hSetKeyExists(ctx, key, "listing_started", true)
 }
 
@@ -242,6 +275,9 @@ func (s *policySvc) getBucketRoutingPolicy(ctx context.Context, user, bucket str
 		}
 		return "", err
 	}
+	if toStor == routingBlock {
+		return "", ErrBlock
+	}
 	return toStor, nil
 }
 
@@ -282,6 +318,35 @@ func (s *policySvc) addBucketRoutingPolicy(ctx context.Context, user, bucket, to
 		return fmt.Errorf("%w: bucket routing policy %s:%s already exists", dom.ErrAlreadyExists, user, bucket)
 	}
 	return nil
+}
+
+func (s *policySvc) addBucketRoutingPolicyBlock(ctx context.Context, user, bucket string) error {
+	if user == "" {
+		return fmt.Errorf("%w: user is required to add bucket routing policy", dom.ErrInvalidArg)
+	}
+	if bucket == "" {
+		return fmt.Errorf("%w: bucket is required to add bucket routing policy", dom.ErrInvalidArg)
+	}
+	key := fmt.Sprintf("p:route:%s:%s", user, bucket)
+	set, err := s.client.SetNX(ctx, key, routingBlock, 0).Result()
+	if err != nil {
+		return err
+	}
+	if !set {
+		return fmt.Errorf("%w: bucket routing policy %s:%s already exists", dom.ErrAlreadyExists, user, bucket)
+	}
+	return nil
+}
+
+func (s *policySvc) deleteBucketRoutingPolicy(ctx context.Context, user, bucket string) error {
+	if user == "" {
+		return fmt.Errorf("%w: user is required to add bucket routing policy", dom.ErrInvalidArg)
+	}
+	if bucket == "" {
+		return fmt.Errorf("%w: bucket is required to add bucket routing policy", dom.ErrInvalidArg)
+	}
+	key := fmt.Sprintf("p:route:%s:%s", user, bucket)
+	return s.client.Del(ctx, key).Err()
 }
 
 func (s *policySvc) GetReplicationSwitch(ctx context.Context, user, bucket string) (ReplicationSwitch, error) {
@@ -346,14 +411,14 @@ func (s *policySvc) getReplicationPolicies(ctx context.Context, key string) (Rep
 		return ReplicationPolicies{}, fmt.Errorf("%w: no replication from policy for user %q", dom.ErrNotFound, key)
 	}
 	var from string
-	toMap := map[string]tasks.Priority{}
+	var toRes []ReplicationDest
 	for _, pol := range res {
 		member, ok := pol.Member.(string)
 		if !ok {
 			return ReplicationPolicies{}, fmt.Errorf("%w: invalid replication policy key: cannot cast to string %+v", dom.ErrInternal, pol)
 		}
 		memberArr := strings.Split(member, ":")
-		if len(memberArr) != 2 {
+		if len(memberArr) < 2 {
 			return ReplicationPolicies{}, fmt.Errorf("%w: invalid replication policy key: should contain from:to, got: %s", dom.ErrInternal, member)
 		}
 		f, to := memberArr[0], memberArr[1]
@@ -363,22 +428,30 @@ func (s *policySvc) getReplicationPolicies(ctx context.Context, key string) (Rep
 		if from != f {
 			return ReplicationPolicies{}, fmt.Errorf("%w: invalid replication policy key: all keys should have same from: %+v", dom.ErrInternal, res)
 		}
-		if from == to {
+		var toBucket *string
+		if len(memberArr) == 3 {
+			toBucket = &memberArr[2]
+		}
+		if from == to && toBucket == nil {
 			return ReplicationPolicies{}, fmt.Errorf("%w: invalid replication policy key: from and to should be different: %+v", dom.ErrInternal, res)
 		}
 		priority := uint8(pol.Score)
 		if priority > uint8(tasks.PriorityHighest5) {
 			return ReplicationPolicies{}, fmt.Errorf("%w: invalid replication policy key %q score: %d", dom.ErrInternal, member, priority)
 		}
-		toMap[to] = tasks.Priority(priority)
+		toRes = append(toRes, ReplicationDest{
+			Priority: tasks.Priority(priority),
+			Bucket:   toBucket,
+			Storage:  to,
+		})
 	}
 	return ReplicationPolicies{
 		From: from,
-		To:   toMap,
+		To:   toRes,
 	}, nil
 }
 
-func (s *policySvc) GetReplicationPolicyInfo(ctx context.Context, user, bucket, from, to string) (ReplicationPolicyStatus, error) {
+func (s *policySvc) GetReplicationPolicyInfo(ctx context.Context, user, bucket, from, to string, toBucket *string) (ReplicationPolicyStatus, error) {
 	if user == "" {
 		return ReplicationPolicyStatus{}, fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -393,6 +466,10 @@ func (s *policySvc) GetReplicationPolicyInfo(ctx context.Context, user, bucket, 
 	}
 
 	fKey := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+
+	if toBucket != nil && *toBucket != "" {
+		fKey += ":" + *toBucket
+	}
 	switchKey := fmt.Sprintf("p:switch:%s:%s", user, bucket)
 
 	res := ReplicationPolicyStatus{}
@@ -444,13 +521,17 @@ func (s *policySvc) ListReplicationPolicyInfo(ctx context.Context) ([]Replicatio
 		key := iter.Val()
 		key = strings.TrimPrefix(key, "p:repl_st:")
 		vals := strings.Split(key, ":")
-		if len(vals) != 4 {
+		if len(vals) < 4 {
 			zerolog.Ctx(ctx).Error().Msgf("invalid replication policy status key %s", key)
 			continue
 		}
 		user, bucket, from, to := vals[0], vals[1], vals[2], vals[3]
+		var toBucket *string
+		if len(vals) == 5 {
+			toBucket = &vals[5]
+		}
 		g.Go(func() error {
-			policy, err := s.GetReplicationPolicyInfo(gCtx, user, bucket, from, to)
+			policy, err := s.GetReplicationPolicyInfo(gCtx, user, bucket, from, to, toBucket)
 			if err != nil {
 				zerolog.Ctx(gCtx).Err(err).Msg("error during list replication policies")
 				return err
@@ -466,6 +547,7 @@ func (s *policySvc) ListReplicationPolicyInfo(ctx context.Context) ([]Replicatio
 				Bucket:                  bucket,
 				From:                    from,
 				To:                      to,
+				ToBucket:                toBucket,
 			}
 			return nil
 		})
@@ -485,9 +567,12 @@ func (s *policySvc) ListReplicationPolicyInfo(ctx context.Context) ([]Replicatio
 	}
 }
 
-func (s *policySvc) IsReplicationPolicyExists(ctx context.Context, user, bucket, from, to string) (bool, error) {
+func (s *policySvc) IsReplicationPolicyExists(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error) {
 	ruleKey := fmt.Sprintf("p:repl:%s:%s", user, bucket)
 	ruleVal := fmt.Sprintf("%s:%s", from, to)
+	if toBucket != nil && *toBucket != "" {
+		ruleVal += ":" + *toBucket
+	}
 	err := s.client.ZRank(ctx, ruleKey, ruleVal).Err()
 	if err != nil {
 		if err == redis.Nil {
@@ -498,7 +583,7 @@ func (s *policySvc) IsReplicationPolicyExists(ctx context.Context, user, bucket,
 	return true, nil
 }
 
-func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket, from, to string) (bool, error) {
+func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error) {
 	if user == "" {
 		return false, fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -513,6 +598,9 @@ func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket,
 	}
 
 	fKey := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		fKey += ":" + *toBucket
+	}
 	paused, err := s.client.HGet(ctx, fKey, "paused").Bool()
 	if err != nil {
 		if err == redis.Nil {
@@ -523,7 +611,7 @@ func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket,
 	return paused, nil
 }
 
-func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from, to string, bytes int64, eventTime time.Time) error {
+func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -541,6 +629,9 @@ func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from
 	}
 
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	err := s.incIfKeyExists(ctx, key, "obj_listed", 1)
 	if err != nil {
 		return err
@@ -555,7 +646,7 @@ func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from
 	return nil
 }
 
-func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, to string, bytes int64, eventTime time.Time) error {
+func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -572,6 +663,9 @@ func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, 
 		return fmt.Errorf("%w: bytes must be positive", dom.ErrInvalidArg)
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	err := s.incIfKeyExists(ctx, key, "obj_done", 1)
 	if err != nil {
 		return err
@@ -619,7 +713,7 @@ func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, 
 	return nil
 }
 
-func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to string, eventTime time.Time) error {
+func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to inc replication policy status", dom.ErrInvalidArg)
 	}
@@ -633,6 +727,9 @@ func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to st
 		return fmt.Errorf("%w: to is required to inc replication policy status", dom.ErrInvalidArg)
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	err := s.incIfKeyExists(ctx, key, "events", 1)
 	if err != nil {
 		return err
@@ -645,7 +742,7 @@ func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to st
 	return nil
 }
 
-func (s *policySvc) IncReplEventsDone(ctx context.Context, user, bucket, from, to string, eventTime time.Time) error {
+func (s *policySvc) IncReplEventsDone(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to inc replication policy status", dom.ErrInvalidArg)
 	}
@@ -659,6 +756,9 @@ func (s *policySvc) IncReplEventsDone(ctx context.Context, user, bucket, from, t
 		return fmt.Errorf("%w: to is required to inc replication policy status", dom.ErrInvalidArg)
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	err := s.incIfKeyExists(ctx, key, "events_done", 1)
 	if err != nil {
 		return err
@@ -753,8 +853,10 @@ func (s *policySvc) AddUserReplicationPolicy(ctx context.Context, user string, f
 	if err == nil && from != prev.From {
 		return fmt.Errorf("%w: all replication policies should have the same from value: got %s, current %s", dom.ErrInvalidArg, from, prev.From)
 	}
-	if _, ok := prev.To[to]; ok {
-		return dom.ErrAlreadyExists
+	for _, p := range prev.To {
+		if p.Storage == to {
+			return dom.ErrAlreadyExists
+		}
 	}
 	key := fmt.Sprintf("p:repl:%s", user)
 	val := fmt.Sprintf("%s:%s", from, to)
@@ -795,14 +897,18 @@ func (s *policySvc) DeleteBucketReplicationsByUser(ctx context.Context, user, fr
 		key := iter.Val()
 		key = strings.TrimPrefix(key, "p:repl_st:")
 		vals := strings.Split(key, ":")
-		if len(vals) != 4 {
+		if len(vals) < 4 {
 			return nil, fmt.Errorf("%w: invalid replication policy status key %s", dom.ErrInternal, key)
 		}
 		bucket, gotFrom, gotTo := vals[1], vals[2], vals[3]
 		if gotFrom != from || gotTo != to {
 			continue
 		}
-		err := s.DeleteReplication(ctx, user, bucket, from, to)
+		var toBucket *string
+		if len(vals) == 5 {
+			toBucket = &vals[4]
+		}
+		err := s.DeleteReplication(ctx, user, bucket, from, to, toBucket)
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("error during list replication policies")
 			continue
@@ -815,7 +921,7 @@ func (s *policySvc) DeleteBucketReplicationsByUser(ctx context.Context, user, fr
 	return deleted, nil
 }
 
-func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket, from string, to string, priority tasks.Priority, agentURL *string) (err error) {
+func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket, from string, to string, priority tasks.Priority, agentURL *string, toBucket *string) (err error) {
 	if user == "" {
 		return fmt.Errorf("%w: user is required to add replication policy", dom.ErrInvalidArg)
 	}
@@ -828,8 +934,11 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 	if to == "" {
 		return fmt.Errorf("%w: to is required to add replication policy", dom.ErrInvalidArg)
 	}
-	if from == to {
-		return fmt.Errorf("%w: invalid replication policy: from and to should be different", dom.ErrInvalidArg)
+
+	isSameStorage := from == to
+	isCustomDestBucket := toBucket != nil && *toBucket != ""
+	if isSameStorage && !isCustomDestBucket {
+		return fmt.Errorf("%w: invalid replication policy: for same storage replication destination bucket name should be different", dom.ErrInvalidArg)
 	}
 	if priority > tasks.PriorityHighest5 {
 		return fmt.Errorf("%w: invalid priority value", dom.ErrInvalidArg)
@@ -842,6 +951,20 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 	if err == nil && route != from {
 		return fmt.Errorf("%w: unable to create bucket %s replciation from %s because it is different from routing %s", dom.ErrInternal, bucket, from, route)
 	}
+	if route == routingBlock {
+		return fmt.Errorf("%w: invalid replication policy: source bucket is already used as destination", dom.ErrInvalidArg)
+	}
+
+	if isCustomDestBucket {
+		_, err := s.GetBucketReplicationPolicies(ctx, user, *toBucket)
+		// custom destination bucket should not have replication policy
+		if !errors.Is(err, dom.ErrNotFound) {
+			if err == nil {
+				return fmt.Errorf("%w: invalid replication policy: destination bucket is already used as source", dom.ErrInvalidArg)
+			}
+			return fmt.Errorf("%w: unable to check destination bucket existing replicatoin policy", err)
+		}
+	}
 
 	prev, err := s.GetBucketReplicationPolicies(ctx, user, bucket)
 	if err != nil && !errors.Is(err, dom.ErrNotFound) {
@@ -850,11 +973,37 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 	if err == nil && from != prev.From {
 		return fmt.Errorf("%w: all replication policies should have the same from value (u: %s b: %s): got %s, current %s", dom.ErrInvalidArg, user, bucket, from, prev.From)
 	}
-	if _, ok := prev.To[to]; ok {
-		return dom.ErrAlreadyExists
+	for _, prevDest := range prev.To {
+		if prevDest.Storage != to {
+			continue
+		}
+		if prevDest.Bucket == toBucket {
+			// both nil or pointing to the same string
+			return dom.ErrAlreadyExists
+		}
+		if prevDest.Bucket != nil && toBucket != nil && *prevDest.Bucket == *toBucket {
+			return dom.ErrAlreadyExists
+		}
 	}
+
+	// block routing requests to the destination bucket
+	if isSameStorage && isCustomDestBucket {
+		err = s.addBucketRoutingPolicyBlock(ctx, user, *toBucket)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				s.deleteBucketRoutingPolicy(context.Background(), user, *toBucket)
+			}
+		}()
+	}
+
 	key := fmt.Sprintf("p:repl:%s:%s", user, bucket)
 	val := fmt.Sprintf("%s:%s", from, to)
+	if isCustomDestBucket {
+		val += ":" + *toBucket
+	}
 	added, err := s.client.ZAddNX(ctx, key, redis.Z{Member: val, Score: float64(priority)}).Result()
 	if err != nil {
 		return err
@@ -869,6 +1018,9 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 	}()
 
 	statusKey := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if isCustomDestBucket {
+		statusKey += ":" + *toBucket
+	}
 	res := ReplicationPolicyStatus{
 		CreatedAt: time.Now().UTC(),
 		AgentURL:  fromStrPtr(agentURL),
@@ -885,28 +1037,40 @@ func fromStrPtr(s *string) string {
 	return *s
 }
 
-func (s *policySvc) PauseReplication(ctx context.Context, user, bucket, from string, to string) error {
-	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to)
+func (s *policySvc) PauseReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
+	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to, toBucket)
 	if err != nil {
 		return err
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	return s.client.HSet(ctx, key, "paused", true).Err()
 }
 
-func (s *policySvc) ResumeReplication(ctx context.Context, user, bucket, from string, to string) error {
-	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to)
+func (s *policySvc) ResumeReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
+	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to, toBucket)
 	if err != nil {
 		return err
 	}
 	key := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		key += ":" + *toBucket
+	}
 	return s.client.HSet(ctx, key, "paused", false).Err()
 }
 
-func (s *policySvc) DeleteReplication(ctx context.Context, user, bucket, from string, to string) error {
+func (s *policySvc) DeleteReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
 	key := fmt.Sprintf("p:repl:%s:%s", user, bucket)
 	val := fmt.Sprintf("%s:%s", from, to)
+	if toBucket != nil && *toBucket != "" {
+		val += ":" + *toBucket
+	}
 	statusKey := fmt.Sprintf("p:repl_st:%s:%s:%s:%s", user, bucket, from, to)
+	if toBucket != nil && *toBucket != "" {
+		statusKey += ":" + *toBucket
+	}
 	switchKey := fmt.Sprintf("p:switch:%s:%s", user, bucket)
 
 	_, err := s.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -938,28 +1102,41 @@ func (s *policySvc) DoReplicationSwitch(ctx context.Context, user, bucket, newMa
 	if err != nil {
 		return fmt.Errorf("%w: unable to get replication policy", err)
 	}
-	if _, ok := replPolicies.To[newMain]; !ok {
+	var prevDest *ReplicationDest
+	oldFollowers := map[string]tasks.Priority{}
+	for _, dest := range replPolicies.To {
+		if dest.Storage == newMain && dest.Bucket == nil {
+			d := dest
+			prevDest = &d
+		}
+	}
+	if prevDest == nil {
 		return fmt.Errorf("%w: no previous replication policy to switch", dom.ErrInvalidArg)
 	}
-	for prevFollower := range replPolicies.To {
-		prevReplication, err := s.GetReplicationPolicyInfo(ctx, user, bucket, prevMain, prevFollower)
+	for _, prevFollower := range replPolicies.To {
+		if prevFollower.Bucket != nil {
+			// todo: support
+			return fmt.Errorf("%w: switch is not supported for custom bucket name replications", dom.ErrInvalidArg)
+		}
+		prevReplication, err := s.GetReplicationPolicyInfo(ctx, user, bucket, prevMain, prevFollower.Storage, prevFollower.Bucket)
 		if err != nil {
 			return err
 		}
 		if prevReplication.IsPaused {
-			return fmt.Errorf("%w: previous replication to %s is paused", dom.ErrInvalidArg, prevFollower)
+			return fmt.Errorf("%w: previous replication to %s is paused", dom.ErrInvalidArg, prevFollower.Storage)
 		}
 		if !prevReplication.ListingStarted {
-			return fmt.Errorf("%w: previous replication to %s is not started", dom.ErrInvalidArg, prevFollower)
+			return fmt.Errorf("%w: previous replication to %s is not started", dom.ErrInvalidArg, prevFollower.Storage)
 		}
 		if prevReplication.InitObjListed > prevReplication.InitObjDone {
-			return fmt.Errorf("%w: previous replication to %s init phase is not done. %d objects remaining", dom.ErrInvalidArg, prevFollower, prevReplication.InitObjListed-prevReplication.InitObjDone)
+			return fmt.Errorf("%w: previous replication to %s init phase is not done. %d objects remaining", dom.ErrInvalidArg, prevFollower.Storage, prevReplication.InitObjListed-prevReplication.InitObjDone)
 		}
 		if prevReplication.AgentURL != "" {
 			return fmt.Errorf("%w: switch is not supported for Chorus-agent setup. Use setup with Chorus-proxy", dom.ErrInvalidArg)
 		}
+		oldFollowers[prevFollower.Storage] = prevFollower.Priority
 	}
-	oldFollowers := replPolicies.To
+
 	const multipartTTL = time.Hour // todo: move to config or api param
 	_, err = s.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		// adjust route policy
