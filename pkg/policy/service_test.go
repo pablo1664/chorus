@@ -910,3 +910,254 @@ func TestReplicationSwitch_GetOldFollowers(t *testing.T) {
 	r.NotEmpty(s.GetOldFollowers())
 	r.EqualValues(followers, s.GetOldFollowers())
 }
+
+func Test_policySvc_CustomDestBucket(t *testing.T) {
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	ctx := context.TODO()
+
+	svc := NewService(c)
+
+	u1 := "u1"
+	b1, b2, b3, b4 := "b1", "b2", "b3", "b4"
+	s1, s2 := "s1", "s2"
+
+	t.Run("rounting block", func(t *testing.T) {
+		r := require.New(t)
+		_, err := svc.GetRoutingPolicy(ctx, u1, b1)
+		r.ErrorIs(err, dom.ErrNotFound)
+		err = svc.addBucketRoutingPolicy(ctx, u1, b1, s1)
+		r.NoError(err)
+		rp, err := svc.GetRoutingPolicy(ctx, u1, b1)
+		r.NoError(err)
+		r.EqualValues(s1, rp)
+
+		err = svc.addBucketRoutingPolicyBlock(ctx, u1, b1)
+		r.Error(err)
+		err = svc.deleteBucketRoutingPolicy(ctx, u1, b1)
+		r.NoError(err)
+
+		err = svc.addBucketRoutingPolicyBlock(ctx, u1, b1)
+		r.NoError(err)
+
+		_, err = svc.GetRoutingPolicy(ctx, u1, b1)
+		r.ErrorIs(err, ErrBlock)
+
+		err = svc.deleteBucketRoutingPolicy(ctx, u1, b1)
+		r.NoError(err)
+	})
+
+	t.Run("correct policy updated", func(t *testing.T) {
+		db.FlushAll()
+		r := require.New(t)
+
+		err := svc.AddUserRoutingPolicy(ctx, u1, s1)
+		r.NoError(err)
+
+		// add existing policies
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s2, tasks.PriorityDefault1, nil, nil)
+		r.NoError(err)
+		// err = svc.AddBucketReplicationPolicy(ctx, u1, b2, s1, s2, tasks.Priority2, nil, nil)
+		// r.NoError(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s2, tasks.Priority3, nil, &b3)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority4, nil, &b2)
+		r.NoError(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.PriorityHighest5, nil, &b4)
+		r.NoError(err)
+
+		rp, err := svc.GetBucketReplicationPolicies(ctx, u1, b1)
+		r.NoError(err)
+		r.EqualValues(s1, rp.From)
+		r.Len(rp.To, 4)
+		for _, d := range rp.To {
+			switch d.Priority {
+			case tasks.PriorityDefault1:
+				r.EqualValues(s2, d.Storage)
+				r.Nil(d.Bucket)
+			case tasks.Priority3:
+				r.EqualValues(s2, d.Storage)
+				r.NotNil(d.Bucket)
+				r.EqualValues(b3, *d.Bucket)
+			case tasks.Priority4:
+				r.EqualValues(s1, d.Storage)
+				r.NotNil(d.Bucket)
+				r.EqualValues(b2, *d.Bucket)
+			case tasks.PriorityHighest5:
+				r.EqualValues(s1, d.Storage)
+				r.NotNil(d.Bucket)
+				r.EqualValues(b4, *d.Bucket)
+			default:
+				t.Error("unexpected policy")
+			}
+		}
+
+		rpi, err := svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, &b2)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+		r.Zero(rpi.EventsDone)
+		r.Zero(rpi.Events)
+		r.Zero(rpi.InitBytesListed)
+		r.Zero(rpi.InitBytesDone)
+		r.Zero(rpi.InitObjListed)
+		r.Zero(rpi.InitObjDone)
+		r.False(rpi.IsPaused)
+
+		rl, err := svc.ListReplicationPolicyInfo(ctx)
+		r.NoError(err)
+		r.Len(rl, 4)
+
+		err = svc.IncReplEvents(ctx, u1, b1, s1, s1, &b2, time.Now())
+		r.NoError(err)
+
+		err = svc.IncReplEventsDone(ctx, u1, b1, s1, s1, &b2, time.Now())
+		r.NoError(err)
+		err = svc.IncReplInitObjListed(ctx, u1, b1, s1, s1, &b2, 5, time.Now())
+		r.NoError(err)
+		err = svc.IncReplInitObjDone(ctx, u1, b1, s1, s1, &b2, 6, time.Now())
+		r.NoError(err)
+		err = svc.PauseReplication(ctx, u1, b1, s1, s1, &b2)
+		r.NoError(err)
+
+		rpi, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, &b2)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+		r.EqualValues(1, rpi.EventsDone)
+		r.EqualValues(1, rpi.Events)
+		r.EqualValues(5, rpi.InitBytesListed)
+		r.EqualValues(6, rpi.InitBytesDone)
+		r.EqualValues(1, rpi.InitObjListed)
+		r.EqualValues(1, rpi.InitObjDone)
+		r.True(rpi.IsPaused)
+
+		rpi, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s2, nil)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+		r.Zero(rpi.EventsDone)
+		r.Zero(rpi.Events)
+		r.Zero(rpi.InitBytesListed)
+		r.Zero(rpi.InitBytesDone)
+		r.Zero(rpi.InitObjListed)
+		r.Zero(rpi.InitObjDone)
+		r.False(rpi.IsPaused)
+		rpi, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s2, &b3)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+		r.Zero(rpi.EventsDone)
+		r.Zero(rpi.Events)
+		r.Zero(rpi.InitBytesListed)
+		r.Zero(rpi.InitBytesDone)
+		r.Zero(rpi.InitObjListed)
+		r.Zero(rpi.InitObjDone)
+		r.False(rpi.IsPaused)
+		rpi, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, &b4)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+		r.Zero(rpi.EventsDone)
+		r.Zero(rpi.Events)
+		r.Zero(rpi.InitBytesListed)
+		r.Zero(rpi.InitBytesDone)
+		r.Zero(rpi.InitObjListed)
+		r.Zero(rpi.InitObjDone)
+		r.False(rpi.IsPaused)
+	})
+
+	t.Run("same storage allowed if bucket is different", func(t *testing.T) {
+		db.FlushAll()
+		r := require.New(t)
+
+		err := svc.AddUserRoutingPolicy(ctx, u1, s1)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority2, nil, &b1)
+		r.Error(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority2, nil, &b2)
+		r.NoError(err)
+
+		_, err = svc.GetRoutingPolicy(ctx, u1, b2)
+		r.ErrorIs(err, ErrBlock)
+		route, err := svc.GetRoutingPolicy(ctx, u1, b1)
+		r.NoError(err)
+		r.EqualValues(s1, route)
+
+		rp, err := svc.GetBucketReplicationPolicies(ctx, u1, b1)
+		r.NoError(err)
+		r.EqualValues(s1, rp.From)
+		r.Len(rp.To, 1)
+		dst := rp.To[0]
+		r.EqualValues(s1, dst.Storage)
+		r.NotNil(dst.Bucket)
+		r.EqualValues(b2, *dst.Bucket)
+		r.EqualValues(tasks.Priority2, dst.Priority)
+
+		rpi, err := svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, &b2)
+		r.NoError(err)
+		r.False(rpi.CreatedAt.IsZero())
+
+		_, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, &b1)
+		r.ErrorIs(err, dom.ErrNotFound)
+		_, err = svc.GetReplicationPolicyInfo(ctx, u1, b1, s1, s1, nil)
+		r.ErrorIs(err, dom.ErrNotFound)
+
+		rl, err := svc.ListReplicationPolicyInfo(ctx)
+		r.NoError(err)
+		r.Len(rl, 1)
+		r.NotNil(rl[0].ToBucket)
+		r.EqualValues(*rl[0].ToBucket, b2)
+		r.EqualValues(rl[0].Bucket, b1)
+	})
+
+	t.Run("dest bucket should not have repl policy", func(t *testing.T) {
+		db.FlushAll()
+		r := require.New(t)
+
+		err := svc.AddUserRoutingPolicy(ctx, u1, s1)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority2, nil, &b2)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b2, s1, s2, tasks.Priority2, nil, nil)
+		r.Error(err)
+
+		err = svc.DeleteReplication(ctx, u1, b1, s1, s1, &b2)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b2, s1, s2, tasks.Priority2, nil, nil)
+		r.NoError(err)
+	})
+
+	t.Run("already exists", func(t *testing.T) {
+		db.FlushAll()
+		r := require.New(t)
+
+		err := svc.AddUserRoutingPolicy(ctx, u1, s1)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority2, nil, &b2)
+		r.NoError(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s1, tasks.Priority2, nil, &b2)
+		r.ErrorIs(err, dom.ErrAlreadyExists)
+	})
+
+	t.Run("different src cannot have same dest", func(t *testing.T) {
+		db.FlushAll()
+		r := require.New(t)
+
+		err := svc.AddUserRoutingPolicy(ctx, u1, s1)
+		r.NoError(err)
+
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b1, s1, s2, tasks.Priority2, nil, &b2)
+		r.NoError(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b3, s1, s2, tasks.Priority2, nil, &b2)
+		r.Error(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b2, s1, s2, tasks.Priority2, nil, &b2)
+		r.Error(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b2, s1, s2, tasks.Priority2, nil, nil)
+		r.Error(err)
+		err = svc.AddBucketReplicationPolicy(ctx, u1, b3, s1, s1, tasks.Priority2, nil, &b2)
+		r.NoError(err)
+	})
+}

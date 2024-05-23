@@ -528,7 +528,7 @@ func (s *policySvc) ListReplicationPolicyInfo(ctx context.Context) ([]Replicatio
 		user, bucket, from, to := vals[0], vals[1], vals[2], vals[3]
 		var toBucket *string
 		if len(vals) == 5 {
-			toBucket = &vals[5]
+			toBucket = &vals[4]
 		}
 		g.Go(func() error {
 			policy, err := s.GetReplicationPolicyInfo(gCtx, user, bucket, from, to, toBucket)
@@ -935,6 +935,11 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 		return fmt.Errorf("%w: to is required to add replication policy", dom.ErrInvalidArg)
 	}
 
+	if toBucket != nil && *toBucket == bucket {
+		// same bucket name equals to no bucket
+		toBucket = nil
+	}
+
 	isSameStorage := from == to
 	isCustomDestBucket := toBucket != nil && *toBucket != ""
 	if isSameStorage && !isCustomDestBucket {
@@ -984,6 +989,47 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 		if prevDest.Bucket != nil && toBucket != nil && *prevDest.Bucket == *toBucket {
 			return dom.ErrAlreadyExists
 		}
+	}
+
+	// check if source bucket is already used as destination in other policy
+	iter := s.client.Scan(ctx, 0, fmt.Sprintf("p:repl:%s:*", user), 0).Iterator()
+	for iter.Next(ctx) {
+		// iterate over user bucket policies
+		key := iter.Val()
+
+		existDestBucket := key[strings.LastIndex(key, ",")+1:]
+		existingDests, err := s.client.ZRange(ctx, key, 0, -1).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
+
+		for _, d := range existingDests {
+			darr := strings.Split(d, ":")
+			if len(darr) < 2 {
+				continue
+			}
+			toStor := darr[1]
+			if len(darr) == 3 {
+				existDestBucket = darr[2]
+			}
+
+			// check if source bucket is already used as destination in other policy
+			if toStor == from && existDestBucket == bucket {
+				return fmt.Errorf("%w: unable to create replication: source bucket already used as destination: %s - %s", dom.ErrInvalidArg, key, d)
+			}
+
+			// check if destiantion bucket is already used as destination in other policy
+			wantDestBucket := bucket
+			if isCustomDestBucket {
+				wantDestBucket = *toBucket
+			}
+			if wantDestBucket == existDestBucket && toStor == to {
+				return fmt.Errorf("%w: unable to create replication: destination bucket already used as destination: %s - %s", dom.ErrInvalidArg, key, d)
+			}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("%w: iterate over existing destinations buckets error", err)
 	}
 
 	// block routing requests to the destination bucket
@@ -1081,6 +1127,11 @@ func (s *policySvc) DeleteReplication(ctx context.Context, user, bucket, from st
 	})
 	if err != nil {
 		return err
+	}
+	if toBucket != nil && *toBucket != "" {
+		if _, routeErr := s.getBucketRoutingPolicy(ctx, user, *toBucket); errors.Is(routeErr, ErrBlock) {
+			s.deleteBucketRoutingPolicy(ctx, user, *toBucket)
+		}
 	}
 	return err
 }
