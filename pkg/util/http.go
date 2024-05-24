@@ -21,18 +21,18 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"net/http"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
-	"net/http"
 )
 
 func WriteError(ctx context.Context, w http.ResponseWriter, err error) {
 	zerolog.Ctx(ctx).Err(err).Msg("error returned")
 	s3Err := mclient.ErrorResponse{}
 	if errors.As(err, &s3Err) {
-
 	} else if errors.Is(err, dom.ErrAuth) {
 		s3Err = mclient.ErrorResponse{
 			XMLName:    xml.Name{},
@@ -63,6 +63,14 @@ func WriteError(ctx context.Context, w http.ResponseWriter, err error) {
 			BucketName: xctx.GetBucket(ctx),
 			Key:        xctx.GetObject(ctx),
 			StatusCode: http.StatusInternalServerError,
+		}
+	} else if errors.Is(err, dom.ErrRoutingBlocked) {
+		s3Err = mclient.ErrorResponse{
+			Code:       "NoSuchBucket",
+			Message:    err.Error(),
+			BucketName: xctx.GetBucket(ctx),
+			Key:        xctx.GetObject(ctx),
+			StatusCode: http.StatusNotFound,
 		}
 	} else {
 		s3Err = mclient.ErrorResponse{

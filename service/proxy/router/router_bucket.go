@@ -17,15 +17,18 @@
 package router
 
 import (
+	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/rs/zerolog"
-	"io"
-	"net/http"
 )
 
 func (r *router) createBucket(req *http.Request) (resp *http.Response, task *tasks.BucketCreatePayload, storage string, isApiErr bool, err error) {
@@ -102,5 +105,45 @@ func (r *router) listBuckets(req *http.Request) (resp *http.Response, storage st
 		return nil, "", false, err
 	}
 	resp, isApiErr, err = client.Do(req)
+	if err != nil {
+		return
+	}
+	var blocked []string
+	blocked, err = r.policySvc.ListBlockedBuckets(ctx, user)
+	if err != nil {
+		return
+	}
+	if len(blocked) == 0 {
+		return
+	}
+	respBody := listBucketsResult{}
+	err = s3client.ExtractRespBody(resp, &respBody)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to unmarshal listBucketsResult response body")
+		return
+	}
+	blockedSet := map[string]struct{}{}
+	for _, b := range blocked {
+		blockedSet[b] = struct{}{}
+	}
+	var filtered []bucketInfo
+	for _, b := range respBody.Buckets.Bucket {
+		if _, ok := blockedSet[b.Name]; !ok {
+			filtered = append(filtered, b)
+		}
+	}
+	if len(filtered) == len(respBody.Buckets.Bucket) {
+		return
+	}
+	respBody.Buckets.Bucket = filtered
+	filteredBytes, err := xml.Marshal(respBody)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to marshal listBucketsResult response body")
+		return
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(filteredBytes))
+	resp.ContentLength = int64(len(filteredBytes))
+
+	// todo: filter buckets
 	return
 }

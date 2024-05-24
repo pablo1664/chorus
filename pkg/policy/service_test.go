@@ -941,10 +941,22 @@ func Test_policySvc_CustomDestBucket(t *testing.T) {
 		r.NoError(err)
 
 		_, err = svc.GetRoutingPolicy(ctx, u1, b1)
-		r.ErrorIs(err, ErrBlock)
+		r.ErrorIs(err, dom.ErrRoutingBlocked)
+
+		blocked, err := svc.ListBlockedBuckets(ctx, u1)
+		r.NoError(err)
+		r.Len(blocked, 1)
+		r.EqualValues(b1, blocked[0])
 
 		err = svc.deleteBucketRoutingPolicy(ctx, u1, b1)
 		r.NoError(err)
+
+		_, err = svc.GetRoutingPolicy(ctx, u1, b1)
+		r.ErrorIs(err, dom.ErrNotFound)
+
+		blocked, err = svc.ListBlockedBuckets(ctx, u1)
+		r.NoError(err)
+		r.Empty(blocked)
 	})
 
 	t.Run("correct policy updated", func(t *testing.T) {
@@ -1077,7 +1089,7 @@ func Test_policySvc_CustomDestBucket(t *testing.T) {
 		r.NoError(err)
 
 		_, err = svc.GetRoutingPolicy(ctx, u1, b2)
-		r.ErrorIs(err, ErrBlock)
+		r.ErrorIs(err, dom.ErrRoutingBlocked)
 		route, err := svc.GetRoutingPolicy(ctx, u1, b1)
 		r.NoError(err)
 		r.EqualValues(s1, route)

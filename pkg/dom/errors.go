@@ -31,6 +31,7 @@ var (
 	ErrInvalidArg           = errors.New("InvalidArg")
 	ErrAuth                 = errors.New("AuthError")
 	ErrPolicy               = errors.New("PolicyError")
+	ErrRoutingBlocked       = errors.New("RoutingBlocked")
 )
 
 func ErrCode(err error) int {

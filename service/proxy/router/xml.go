@@ -18,6 +18,8 @@ package router
 
 import (
 	"encoding/xml"
+	"time"
+
 	"github.com/clyso/chorus/pkg/dom"
 )
 
@@ -76,4 +78,23 @@ type completeMultipartUploadResult struct {
 	ChecksumCRC32C string
 	ChecksumSHA1   string
 	ChecksumSHA256 string
+}
+
+type listBucketsResult struct {
+	// Container for one or more buckets.
+	Buckets struct {
+		Bucket []bucketInfo
+	}
+	Owner owner
+}
+
+// owner container for bucket owner information.
+type owner struct {
+	DisplayName string
+	ID          string
+}
+
+type bucketInfo struct {
+	Name         string
+	CreationDate time.Time
 }

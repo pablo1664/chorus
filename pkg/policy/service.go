@@ -72,8 +72,6 @@ const (
 	routingBlock = "-"
 )
 
-var ErrBlock = errors.New("Blocked")
-
 type ReplicationSwitch struct {
 	IsDone       bool          `redis:"IsDone"`
 	OldMain      string        `redis:"OldMain"`
@@ -177,6 +175,7 @@ type Service interface {
 	deleteBucketRoutingPolicy(ctx context.Context, user, bucket string) error
 	GetUserRoutingPolicy(ctx context.Context, user string) (string, error)
 	AddUserRoutingPolicy(ctx context.Context, user, toStorage string) error
+	ListBlockedBuckets(ctx context.Context, user string) ([]string, error)
 
 	IsReplicationSwitchInProgress(ctx context.Context, user, bucket string) (bool, error)
 	GetReplicationSwitch(ctx context.Context, user, bucket string) (ReplicationSwitch, error)
@@ -211,6 +210,23 @@ func NewService(client *redis.Client) Service {
 
 type policySvc struct {
 	client *redis.Client
+}
+
+// ListBlockedBuckets implements Service.
+func (s *policySvc) ListBlockedBuckets(ctx context.Context, user string) ([]string, error) {
+	var blocked []string
+	iter := s.client.Scan(ctx, 0, fmt.Sprintf("p:route:%s:*", user), 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		bucket := key[strings.LastIndex(key, ":")+1:]
+		if _, err := s.getBucketRoutingPolicy(ctx, user, bucket); errors.Is(err, dom.ErrRoutingBlocked) {
+			blocked = append(blocked, bucket)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("%w: iterate over replications error", err)
+	}
+	return blocked, nil
 }
 
 func (s *policySvc) ObjListStarted(ctx context.Context, user, bucket, from, to string, toBucket *string) error {
@@ -279,7 +295,7 @@ func (s *policySvc) getBucketRoutingPolicy(ctx context.Context, user, bucket str
 		return "", err
 	}
 	if toStor == routingBlock {
-		return "", ErrBlock
+		return "", dom.ErrRoutingBlocked
 	}
 	return toStor, nil
 }
@@ -1019,7 +1035,7 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 		// iterate over user bucket policies
 		key := iter.Val()
 
-		existDestBucket := key[strings.LastIndex(key, ",")+1:]
+		existDestBucket := key[strings.LastIndex(key, ":")+1:]
 		existingDests, err := s.client.ZRange(ctx, key, 0, -1).Result()
 		if err != nil && err != redis.Nil {
 			return err
@@ -1160,7 +1176,7 @@ func (s *policySvc) DeleteReplication(ctx context.Context, user, bucket, from st
 		return err
 	}
 	if toBucket != nil && *toBucket != "" {
-		if _, routeErr := s.getBucketRoutingPolicy(ctx, user, *toBucket); errors.Is(routeErr, ErrBlock) {
+		if _, routeErr := s.getBucketRoutingPolicy(ctx, user, *toBucket); errors.Is(routeErr, dom.ErrRoutingBlocked) {
 			s.deleteBucketRoutingPolicy(ctx, user, *toBucket)
 		}
 	}
