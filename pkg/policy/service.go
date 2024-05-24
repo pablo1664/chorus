@@ -214,6 +214,9 @@ type policySvc struct {
 }
 
 func (s *policySvc) ObjListStarted(ctx context.Context, user, bucket, from, to string, toBucket *string) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -452,6 +455,9 @@ func (s *policySvc) getReplicationPolicies(ctx context.Context, key string) (Rep
 }
 
 func (s *policySvc) GetReplicationPolicyInfo(ctx context.Context, user, bucket, from, to string, toBucket *string) (ReplicationPolicyStatus, error) {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return ReplicationPolicyStatus{}, fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -568,6 +574,9 @@ func (s *policySvc) ListReplicationPolicyInfo(ctx context.Context) ([]Replicatio
 }
 
 func (s *policySvc) IsReplicationPolicyExists(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error) {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	ruleKey := fmt.Sprintf("p:repl:%s:%s", user, bucket)
 	ruleVal := fmt.Sprintf("%s:%s", from, to)
 	if toBucket != nil && *toBucket != "" {
@@ -584,6 +593,9 @@ func (s *policySvc) IsReplicationPolicyExists(ctx context.Context, user, bucket,
 }
 
 func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket, from, to string, toBucket *string) (bool, error) {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return false, fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -612,6 +624,9 @@ func (s *policySvc) IsReplicationPolicyPaused(ctx context.Context, user, bucket,
 }
 
 func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -647,6 +662,9 @@ func (s *policySvc) IncReplInitObjListed(ctx context.Context, user, bucket, from
 }
 
 func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, to string, toBucket *string, bytes int64, eventTime time.Time) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to get replication policy status", dom.ErrInvalidArg)
 	}
@@ -714,6 +732,9 @@ func (s *policySvc) IncReplInitObjDone(ctx context.Context, user, bucket, from, 
 }
 
 func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to inc replication policy status", dom.ErrInvalidArg)
 	}
@@ -743,6 +764,9 @@ func (s *policySvc) IncReplEvents(ctx context.Context, user, bucket, from, to st
 }
 
 func (s *policySvc) IncReplEventsDone(ctx context.Context, user, bucket, from, to string, toBucket *string, eventTime time.Time) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to inc replication policy status", dom.ErrInvalidArg)
 	}
@@ -922,6 +946,9 @@ func (s *policySvc) DeleteBucketReplicationsByUser(ctx context.Context, user, fr
 }
 
 func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket, from string, to string, priority tasks.Priority, agentURL *string, toBucket *string) (err error) {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	if user == "" {
 		return fmt.Errorf("%w: user is required to add replication policy", dom.ErrInvalidArg)
 	}
@@ -933,11 +960,6 @@ func (s *policySvc) AddBucketReplicationPolicy(ctx context.Context, user, bucket
 	}
 	if to == "" {
 		return fmt.Errorf("%w: to is required to add replication policy", dom.ErrInvalidArg)
-	}
-
-	if toBucket != nil && *toBucket == bucket {
-		// same bucket name equals to no bucket
-		toBucket = nil
 	}
 
 	isSameStorage := from == to
@@ -1084,6 +1106,9 @@ func fromStrPtr(s *string) string {
 }
 
 func (s *policySvc) PauseReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to, toBucket)
 	if err != nil {
 		return err
@@ -1096,6 +1121,9 @@ func (s *policySvc) PauseReplication(ctx context.Context, user, bucket, from str
 }
 
 func (s *policySvc) ResumeReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	_, err := s.GetReplicationPolicyInfo(ctx, user, bucket, from, to, toBucket)
 	if err != nil {
 		return err
@@ -1108,6 +1136,9 @@ func (s *policySvc) ResumeReplication(ctx context.Context, user, bucket, from st
 }
 
 func (s *policySvc) DeleteReplication(ctx context.Context, user, bucket, from string, to string, toBucket *string) error {
+	if toBucket != nil && *toBucket == bucket {
+		toBucket = nil
+	}
 	key := fmt.Sprintf("p:repl:%s:%s", user, bucket)
 	val := fmt.Sprintf("%s:%s", from, to)
 	if toBucket != nil && *toBucket != "" {
