@@ -317,6 +317,560 @@ func TestBucketID_accountRoutingPolicyID(t *testing.T) {
 	}
 }
 
+func TestStorageBucketID_storageReplID(t *testing.T) {
+	type fields struct {
+		Storage  string
+		BucketID BucketID
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "stor acc buck",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:s::",
+		},
+		{
+			name: "acc buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "empty",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "stor",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s::",
+		},
+		{
+			name: "stor acc",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s::",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := StorageBucketID{
+				Storage:  tt.fields.Storage,
+				BucketID: tt.fields.BucketID,
+			}
+			if got := b.storageReplID(); got != tt.want {
+				t.Errorf("StorageBucketID.storageReplID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStorageBucketID_accountReplID(t *testing.T) {
+	type fields struct {
+		Storage  string
+		BucketID BucketID
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "stor acc buck",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:s:a:",
+		},
+		{
+			name: "acc buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl::a:",
+		},
+		{
+			name: "buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "empty",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "stor",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s::",
+		},
+		{
+			name: "stor acc",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s:a:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := StorageBucketID{
+				Storage:  tt.fields.Storage,
+				BucketID: tt.fields.BucketID,
+			}
+			if got := b.accountReplID(); got != tt.want {
+				t.Errorf("StorageBucketID.accountReplID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStorageBucketID_bucketReplID(t *testing.T) {
+	type fields struct {
+		Storage  string
+		BucketID BucketID
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "stor acc buck",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:s:a:b",
+		},
+		{
+			name: "acc buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl::a:b",
+		},
+		{
+			name: "buck",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "b",
+				},
+			},
+			want: "p:repl:::b",
+		},
+		{
+			name: "empty",
+			fields: fields{
+				Storage: "",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:::",
+		},
+		{
+			name: "stor",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s::",
+		},
+		{
+			name: "stor acc",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "",
+				},
+			},
+			want: "p:repl:s:a:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := StorageBucketID{
+				Storage:  tt.fields.Storage,
+				BucketID: tt.fields.BucketID,
+			}
+			if got := b.bucketReplID(); got != tt.want {
+				t.Errorf("StorageBucketID.bucketReplID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplID_validate(t *testing.T) {
+	type fields struct {
+		Src  StorageBucketID
+		Dest StorageBucketID
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		wantErr bool
+	}{
+		{
+			name: "src invalid",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1:",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "dest invalid",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2:",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "only src buck is empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "only dest buck is empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "only src acc is empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "only dest acc is empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "both acc are empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b2",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "both buckets are empty",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "stor to stor",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "cant sync to same stor",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "cant sync to itself",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "cant sync same acc",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "cant sync same bucket",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "",
+						Bucket:  "b1",
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ReplID{
+				Src:  tt.fields.Src,
+				Dest: tt.fields.Dest,
+			}
+			if err := r.validate(); (err != nil) != tt.wantErr {
+				t.Errorf("ReplID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func Test_RoutingPolicy_e2e(t *testing.T) {
 	r := require.New(t)
 	db := miniredis.RunT(t)
@@ -538,4 +1092,54 @@ func Test_RoutingPolicyBlock_e2e(t *testing.T) {
 	list, err = s.ListBlockedBuckets(ctx, "unknown")
 	r.NoError(err, "list for unknown account")
 	r.Empty(list, "list for unknown account")
+}
+
+func TestBucketID_validate(t *testing.T) {
+	type fields struct {
+		Account string
+		Bucket  string
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := BucketID{
+				Account: tt.fields.Account,
+				Bucket:  tt.fields.Bucket,
+			}
+			if err := b.validate(); (err != nil) != tt.wantErr {
+				t.Errorf("BucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStorageBucketID_validate(t *testing.T) {
+	type fields struct {
+		Storage  string
+		BucketID BucketID
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		wantErr bool
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := StorageBucketID{
+				Storage:  tt.fields.Storage,
+				BucketID: tt.fields.BucketID,
+			}
+			if err := b.validate(); (err != nil) != tt.wantErr {
+				t.Errorf("StorageBucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }

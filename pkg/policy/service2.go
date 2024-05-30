@@ -73,6 +73,21 @@ func (b StorageBucketID) validate() error {
 	return nil
 }
 
+func (b StorageBucketID) bucketReplID() string {
+	return fmt.Sprintf("p:repl:%s", b.String())
+}
+
+func (b StorageBucketID) accountReplID() string {
+	b.BucketID.Bucket = ""
+	return fmt.Sprintf("p:repl:%s", b.String())
+}
+
+func (b StorageBucketID) storageReplID() string {
+	b.BucketID.Bucket = ""
+	b.BucketID.Account = ""
+	return fmt.Sprintf("p:repl:%s", b.String())
+}
+
 func (b StorageBucketID) String() string {
 	return fmt.Sprintf("%s:%s", b.Storage, b.BucketID.String())
 }
@@ -84,6 +99,31 @@ type ReplDest struct {
 
 type ReplID struct {
 	Src, Dest StorageBucketID
+}
+
+func (r ReplID) validate() error {
+	if err := r.Src.validate(); err != nil {
+		return fmt.Errorf("%w: invalid src", err)
+	}
+	if err := r.Dest.validate(); err != nil {
+		return fmt.Errorf("%w: invalid dest", err)
+	}
+	if r.Src.Account == "" && r.Dest.Account != "" {
+		return fmt.Errorf("%w: invalid dest: if src acc is not set, then dest acc should also be empty ", dom.ErrInvalidArg)
+	}
+	if r.Dest.Account == "" && r.Src.Account != "" {
+		return fmt.Errorf("%w: invalid dest: if dest acc is not set, then src acc should also be empty ", dom.ErrInvalidArg)
+	}
+	if r.Src.Bucket == "" && r.Dest.Bucket != "" {
+		return fmt.Errorf("%w: invalid dest: if src bucket is not set, then dest bucket should also be empty ", dom.ErrInvalidArg)
+	}
+	if r.Dest.Bucket == "" && r.Src.Bucket != "" {
+		return fmt.Errorf("%w: invalid dest: if dest bucket is not set, then src bucket should also be empty ", dom.ErrInvalidArg)
+	}
+	if r.Src.Storage == r.Dest.Storage && r.Src.Bucket == r.Dest.Bucket && r.Src.Account == r.Dest.Account {
+		return fmt.Errorf("%w: cannot replicate to itself", dom.ErrInvalidArg)
+	}
+	return nil
 }
 
 type Service2 interface {
@@ -109,11 +149,6 @@ type Service2 interface {
 	// Retruns all blocked buckets if no account provided.
 	ListBlockedBuckets(ctx context.Context, account string) (map[string]struct{}, error)
 
-	IsReplicationSwitchInProgress(ctx context.Context, src StorageBucketID) (bool, error)
-	GetReplicationSwitch(ctx context.Context, src StorageBucketID) (ReplicationSwitch, error)
-	DoReplicationSwitch(ctx context.Context, id ReplID) error
-	ReplicationSwitchDone(ctx context.Context, src StorageBucketID) error
-
 	// GetBucketReplicationPolicies returns destinations for bucket replication.
 	// If no bucket replication policy found, fallbacks to Account or Storage default Replication if exists.
 	// Possible errors:
@@ -123,7 +158,6 @@ type Service2 interface {
 	// AddReplicationPolicy - adds replication policy.
 	// id.Src can be defined partially - omit src.Bucket to create Storage or Account level default policy.
 	// id.Src should not conflict with routing policy.
-	// id.Dest should be fully defined.
 	// Possible errors:
 	//  dom.ErrAlreadyExists - replication policy already exists.
 	//  dom.ErrInvalidArg - invalid arguments.
@@ -173,6 +207,11 @@ type Service2 interface {
 	// Possible errors:
 	//  dom.ErrNotFound - no replication policy found.
 	ResumeReplication(ctx context.Context, id ReplID) error
+
+	IsReplicationSwitchInProgress(ctx context.Context, src StorageBucketID) (bool, error)
+	GetReplicationSwitch(ctx context.Context, src StorageBucketID) (ReplicationSwitch, error)
+	DoReplicationSwitch(ctx context.Context, id ReplID) error
+	ReplicationSwitchDone(ctx context.Context, src StorageBucketID) error
 
 	// todo: refactor
 	// DeleteBucketReplicationsByUser(ctx context.Context, user, from string, to string) ([]string, error)
@@ -339,8 +378,106 @@ func (s *policySvc2) ListBlockedBuckets(ctx context.Context, account string) (ma
 	return buckets, nil
 }
 
+func (s *policySvc2) GetBucketReplicationPolicies(ctx context.Context, srcID StorageBucketID) ([]ReplDest, error) {
+	if _, ok := s.storages[srcID.Storage]; !ok {
+		return nil, fmt.Errorf("%w: unable to ge repl policy: unknown storage %q", dom.ErrInvalidArg, srcID.Storage)
+	}
+	if srcID.Bucket == "" {
+		return nil, fmt.Errorf("%w: unable to ge repl policy: bucket name required", dom.ErrInvalidArg)
+	}
+
+	pipe := s.client.Pipeline()
+	// lookup policies with fallback
+	results := []*redis.ZSliceCmd{
+		pipe.ZRangeWithScores(ctx, srcID.bucketReplID(), 0, -1),  // bucket level
+		pipe.ZRangeWithScores(ctx, srcID.accountReplID(), 0, -1), // account level
+		pipe.ZRangeWithScores(ctx, srcID.storageReplID(), 0, -1), // storage level
+	}
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	var destinations []ReplDest
+	for _, res := range results {
+		if res.Err() != nil {
+			continue
+		}
+		if len(res.Val()) == 0 {
+			continue
+		}
+
+		for _, v := range res.Val() {
+			destStr, ok := v.Member.(string)
+			if !ok {
+				zerolog.Ctx(ctx).Error().Msgf("invalid replication destination format %+v", v.Member)
+				continue
+			}
+			destArr := strings.Split(destStr, ":")
+			if len(destArr) != 3 {
+				zerolog.Ctx(ctx).Error().Msgf("invalid replication destination format %s", destStr)
+				continue
+			}
+			storage, account, bucket := destArr[0], destArr[1], destArr[2]
+			priority := tasks.Priority(v.Score)
+			if priority > tasks.PriorityHighest5 {
+				zerolog.Ctx(ctx).Error().Msgf("invalid replication destination priority %v", priority)
+				priority = tasks.PriorityDefault1
+			}
+			dest := ReplDest{
+				Priority: priority,
+				ID: StorageBucketID{
+					Storage: storage,
+					BucketID: BucketID{
+						Account: account,
+						Bucket:  bucket,
+					},
+				},
+			}
+			if dest.ID.Bucket == "" {
+				// copy values from source for storage and account level policies:
+				dest.ID.Bucket = srcID.Bucket
+				if dest.ID.Account == "" {
+					dest.ID.Account = srcID.Account
+				}
+			}
+			destinations = append(destinations, dest)
+		}
+		if len(destinations) != 0 {
+			// found
+			break
+		}
+		// fallback to next policy level
+	}
+	if len(destinations) == 0 {
+		return nil, dom.ErrNotFound
+	}
+	return destinations, nil
+}
+
 func (s *policySvc2) AddReplicationPolicy(ctx context.Context, id ReplID, priority tasks.Priority, agentURL *string) error {
-	panic("unimplemented")
+	if _, ok := s.storages[id.Src.Storage]; !ok {
+		return fmt.Errorf("%w: unable to create routing policy: unknown source storage %s", dom.ErrInvalidArg, id.Src.Storage)
+	}
+	if _, ok := s.storages[id.Dest.Storage]; !ok {
+		return fmt.Errorf("%w: unable to create routing policy: unknown destination storage %s", dom.ErrInvalidArg, id.Dest.Storage)
+	}
+	if err := id.validate(); err != nil {
+		return fmt.Errorf("%w: unable to create routing policy: invalid id", err)
+	}
+
+	routing, err := s.GetRoutingPolicy(ctx, id.Src.BucketID)
+	if err != nil {
+		return err
+	}
+	if routing != id.Src.Storage {
+		return fmt.Errorf("%w: replication source storage %s is different from routing storage %s", dom.ErrInvalidArg, id.Src.Storage, routing)
+	}
+
+	// check if src is already used as dst in different policy -> circular replication not allowed
+
+	// check if dst is already used as dst in different policy -> cannot merge multiple buckets into one
+
+	return nil
 }
 
 func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) error {
@@ -348,10 +485,6 @@ func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) err
 }
 
 func (s *policySvc2) DoReplicationSwitch(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
-}
-
-func (s *policySvc2) GetBucketReplicationPolicies(ctx context.Context, srcID StorageBucketID) ([]ReplDest, error) {
 	panic("unimplemented")
 }
 
