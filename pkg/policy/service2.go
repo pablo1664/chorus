@@ -204,7 +204,7 @@ func (s *policySvc2) GetRoutingPolicy(ctx context.Context, srcID BucketID) (stri
 	bKey, aKey := srcID.bucketRoutingPolicyID(), srcID.accountRoutingPolicyID()
 	pipe := s.client.Pipeline()
 	bRes, aRes := pipe.Get(ctx, bKey), pipe.Get(ctx, aKey)
-	if _, err := pipe.Exec(ctx); err != nil {
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return "", err
 	}
 
@@ -218,11 +218,11 @@ func (s *policySvc2) GetRoutingPolicy(ctx context.Context, srcID BucketID) (stri
 		}
 
 		// policy found:
-		if _, ok := s.storages[route]; !ok {
-			return "", fmt.Errorf("%w: routing policy %q points to unknown storage %q", dom.ErrInternal, key, route)
-		}
 		if route == routingBlock {
 			return "", dom.ErrRoutingBlocked
+		}
+		if _, ok := s.storages[route]; !ok {
+			return "", fmt.Errorf("%w: routing policy %q points to unknown storage %q", dom.ErrInternal, key, route)
 		}
 		return route, nil
 	}

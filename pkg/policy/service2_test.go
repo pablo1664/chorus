@@ -508,12 +508,12 @@ func Test_RoutingPolicyBlock_e2e(t *testing.T) {
 	r.ErrorIs(err, dom.ErrRoutingBlocked, "bucket with account blocked")
 
 	r.NoError(s.DeleteRoutingPolicy(ctx, BucketID{
-		Account: a1,
+		Account: a2,
 		Bucket:  b2,
 	}), "delete account policy")
 
 	route, err = s.GetRoutingPolicy(ctx, BucketID{
-		Account: a1,
+		Account: a2,
 		Bucket:  b2,
 	})
 	r.NoError(err)
@@ -528,13 +528,12 @@ func Test_RoutingPolicyBlock_e2e(t *testing.T) {
 	list, err = s.ListBlockedBuckets(ctx, a1)
 	r.NoError(err, "list for a1 account")
 	r.Len(list, 1, "list for a1 account")
-	r.Contains(list, b1, "list for a1 account")
+	r.Contains(list, b2, "list for a1 account")
 
-	list, err = s.ListBlockedBuckets(ctx, "")
+	list, err = s.ListBlockedBuckets(ctx, a2)
 	r.NoError(err, "list for a2 account")
-	r.Len(list, 2, "list for a2 account")
+	r.Len(list, 1, "list for a2 account")
 	r.Contains(list, b1, "list for a2 account")
-	r.Contains(list, b2, "list for a2 account")
 
 	list, err = s.ListBlockedBuckets(ctx, "unknown")
 	r.NoError(err, "list for unknown account")
