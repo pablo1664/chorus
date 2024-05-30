@@ -69,7 +69,8 @@ if not prev or unixtime(prev) < unixtime(ARGV[2]) then return redis.call("hset",
 )
 
 const (
-	routingBlock = "-"
+	routingBlock       = "-"
+	routingBlockSetKey = "p:routing-block-set"
 )
 
 type ReplicationSwitch struct {
@@ -209,7 +210,9 @@ func NewService(client *redis.Client) Service {
 }
 
 type policySvc struct {
-	client *redis.Client
+	mainStorage string
+	storages    map[string]bool
+	client      *redis.Client
 }
 
 // ListBlockedBuckets implements Service.
@@ -1194,7 +1197,7 @@ func (s *policySvc) DoReplicationSwitch(ctx context.Context, user, bucket, newMa
 		return fmt.Errorf("%w: unable to get routing policy", err)
 	}
 	if prevMain == newMain {
-		return fmt.Errorf("%w: storage %s is laready main for bucket %s", dom.ErrAlreadyExists, newMain, bucket)
+		return fmt.Errorf("%w: storage %s is already main for bucket %s", dom.ErrAlreadyExists, newMain, bucket)
 	}
 	replPolicies, err := s.GetBucketReplicationPolicies(ctx, user, bucket)
 	if err != nil {
