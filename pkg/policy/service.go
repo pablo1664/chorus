@@ -33,6 +33,7 @@ import (
 
 var (
 	luaHIncrByEx = redis.NewScript(`if redis.call('exists',KEYS[1]) == 1 then return redis.call("hincrby", KEYS[1], ARGV[1], ARGV[2]) else return 0 end`)
+	luaZIncrByEx = redis.NewScript(`if tonumber(redis.call('zscore',KEYS[1],ARGV[1])) then return redis.call("zincrby", KEYS[1], ARGV[2], ARGV[1]) else return nil end`)
 	luaHSetEx    = redis.NewScript(`if redis.call('exists',KEYS[1]) == 1 then redis.call("hset", KEYS[1], ARGV[1], ARGV[2]); return 1 else return 0 end`)
 
 	luaUpdateTsIfGreater = redis.NewScript(`local function YearInSec(y)

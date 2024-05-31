@@ -12,6 +12,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const (
+	// replSrcIdxKey - redis key to replication sources index represented as SortedSet.
+	// Where member is dest id and member score is number of destinations.
+	replSrcIdxKey = "p:repl-idx:src"
+	// replDestIdxKey - redis key for replication destinations index represented as Set.
+	// Where each set member is destination id.
+	replDestIdxKey = "p:repl-idx:dest"
+)
+
 // BucketID - points to a group of objects in terms of object storage (bucket, container, directory)
 type BucketID struct {
 	// Account - for SWIFT - account, for S3 - empty.
@@ -78,13 +87,13 @@ func (b StorageBucketID) bucketReplID() string {
 }
 
 func (b StorageBucketID) accountReplID() string {
-	b.BucketID.Bucket = ""
+	b.Bucket = ""
 	return fmt.Sprintf("p:repl:%s", b.String())
 }
 
 func (b StorageBucketID) storageReplID() string {
-	b.BucketID.Bucket = ""
-	b.BucketID.Account = ""
+	b.Bucket = ""
+	b.Account = ""
 	return fmt.Sprintf("p:repl:%s", b.String())
 }
 
@@ -99,6 +108,10 @@ type ReplDest struct {
 
 type ReplID struct {
 	Src, Dest StorageBucketID
+}
+
+func (r ReplID) String() string {
+	return r.Src.String() + "->" + r.Dest.String()
 }
 
 func (r ReplID) validate() error {
@@ -161,11 +174,14 @@ type Service2 interface {
 	// Possible errors:
 	//  dom.ErrAlreadyExists - replication policy already exists.
 	//  dom.ErrInvalidArg - invalid arguments.
-	AddReplicationPolicy(ctx context.Context, id ReplID, priority tasks.Priority, agentURL *string) error
+	AddReplicationPolicy(ctx context.Context, id ReplID, priority tasks.Priority) error
 	// DeleteReplicationPolicy - deletes corresponig policy.
 	// Possible errors:
 	//  dom.ErrNotFound - no replication policies found.
 	DeleteReplicationPolicy(ctx context.Context, id ReplID) error
+
+	// AddReplicationInfo - creates mutable metadata for bucket replication policy.
+	AddReplicationInfo(ctx context.Context, id ReplID, agentURL *string) error
 
 	// GetReplicationPolicyInfo - returns replication status.
 	// Possible errors:
@@ -454,15 +470,15 @@ func (s *policySvc2) GetBucketReplicationPolicies(ctx context.Context, srcID Sto
 	return destinations, nil
 }
 
-func (s *policySvc2) AddReplicationPolicy(ctx context.Context, id ReplID, priority tasks.Priority, agentURL *string) error {
+func (s *policySvc2) AddReplicationPolicy(ctx context.Context, id ReplID, priority tasks.Priority) (err error) {
 	if _, ok := s.storages[id.Src.Storage]; !ok {
-		return fmt.Errorf("%w: unable to create routing policy: unknown source storage %s", dom.ErrInvalidArg, id.Src.Storage)
+		return fmt.Errorf("%w: unable to create replication policy: unknown source storage %s", dom.ErrInvalidArg, id.Src.Storage)
 	}
 	if _, ok := s.storages[id.Dest.Storage]; !ok {
-		return fmt.Errorf("%w: unable to create routing policy: unknown destination storage %s", dom.ErrInvalidArg, id.Dest.Storage)
+		return fmt.Errorf("%w: unable to create replication policy: unknown destination storage %s", dom.ErrInvalidArg, id.Dest.Storage)
 	}
 	if err := id.validate(); err != nil {
-		return fmt.Errorf("%w: unable to create routing policy: invalid id", err)
+		return fmt.Errorf("%w: unable to create replication policy: invalid id", err)
 	}
 
 	routing, err := s.GetRoutingPolicy(ctx, id.Src.BucketID)
@@ -473,15 +489,167 @@ func (s *policySvc2) AddReplicationPolicy(ctx context.Context, id ReplID, priori
 		return fmt.Errorf("%w: replication source storage %s is different from routing storage %s", dom.ErrInvalidArg, id.Src.Storage, routing)
 	}
 
-	// check if src is already used as dst in different policy -> circular replication not allowed
+	// check if src is already used as dst in different policy -> cascading replication is not allowed
+	pipe := s.client.Pipeline()
+	boolRes := []*redis.BoolCmd{
+		pipe.SIsMember(ctx, replDestIdxKey, id.Src.bucketReplID()),  // bucket level
+		pipe.SIsMember(ctx, replDestIdxKey, id.Src.accountReplID()), // account level
+		pipe.SIsMember(ctx, replDestIdxKey, id.Src.storageReplID()), // storage level
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("%w: unable to check if src already used as dest", err)
+	}
+	for _, res := range boolRes {
+		if res.Err() != nil {
+			continue
+		}
+		if res.Val() {
+			return fmt.Errorf("%w: unable to create replication policy: src %s is already used as dest", dom.ErrInvalidArg, id.Src.String())
+		}
+	}
+
+	// check if dst is already used as src in different policy -> circular or cascading replication is not allowed
+	pipe = s.client.Pipeline()
+	floatRes := []*redis.FloatCmd{
+		pipe.ZScore(ctx, replSrcIdxKey, id.Dest.bucketReplID()),  // bucket level
+		pipe.ZScore(ctx, replSrcIdxKey, id.Dest.accountReplID()), // account level
+		pipe.ZScore(ctx, replSrcIdxKey, id.Dest.storageReplID()), // storage level
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("%w: unable to check if dest already used as src", err)
+	}
+	for _, res := range floatRes {
+		if res.Err() != nil {
+			continue
+		}
+		if res.Val() > 0 {
+			return fmt.Errorf("%w: unable to create replication policy: dest %s is already used as src", dom.ErrInvalidArg, id.Dest.String())
+		}
+	}
 
 	// check if dst is already used as dst in different policy -> cannot merge multiple buckets into one
+	pipe = s.client.Pipeline()
+	boolRes = []*redis.BoolCmd{
+		pipe.SIsMember(ctx, replDestIdxKey, id.Dest.bucketReplID()),  // bucket level
+		pipe.SIsMember(ctx, replDestIdxKey, id.Dest.accountReplID()), // account level
+		pipe.SIsMember(ctx, replDestIdxKey, id.Dest.storageReplID()), // storage level
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("%w: unable to check if dest already used in diffrent replication", err)
+	}
+	for _, res := range boolRes {
+		if res.Err() != nil {
+			continue
+		}
+		if res.Val() {
+			return fmt.Errorf("%w: unable to create replication policy: dest %s is already used as dest", dom.ErrInvalidArg, id.Dest.String())
+		}
+	}
+
+	// validation done. create policy.
+
+	// 1. block routing requests to the destination bucket if it replicates to the same storage
+	if id.Src.Storage == id.Dest.Storage {
+		err = s.addRoutingBlockPolicy(ctx, id.Dest.BucketID)
+		if err != nil {
+			return fmt.Errorf("%w: unable to block routing to dest", err)
+		}
+		// rollback in case of further errors
+		defer func() {
+			if err != nil {
+				rollbackErr := s.DeleteRoutingPolicy(context.Background(), id.Dest.BucketID)
+				if rollbackErr != nil {
+					zerolog.Ctx(ctx).Err(rollbackErr).Msgf("unable to rollback routing block for %s", id.Dest.BucketID.String())
+				}
+			}
+		}()
+	}
+	// 2. add policy if not exists
+	var added int64
+	added, err = s.client.ZAddNX(ctx, id.Src.bucketReplID(), redis.Z{
+		Score:  float64(priority),
+		Member: id.Dest.String(),
+	}).Result()
+	if err != nil {
+		return fmt.Errorf("%w: unable to add replication", err)
+	}
+	if added == 0 {
+		return fmt.Errorf("%w: dest %s already exists", dom.ErrAlreadyExists, id.Dest.String())
+	}
+	// rollback in case of further errors
+	defer func() {
+		if err != nil {
+			rollbackErr := s.client.ZRem(context.Background(), id.Src.bucketReplID(), id.Dest.String()).Err()
+			if rollbackErr != nil {
+				zerolog.Ctx(ctx).Err(rollbackErr).Msgf("unable to rollback replication policy for %s-%s", id.Src.bucketReplID(), id.Dest.String())
+			}
+		}
+	}()
+
+	// 3. update indexes
+	added, err = s.client.SAdd(ctx, replDestIdxKey, id.Dest.bucketReplID()).Result()
+	if err != nil {
+		return fmt.Errorf("%w: unable to update replication dest index", err)
+	}
+	if added == 0 {
+		return fmt.Errorf("%w: dest index %s already exists", dom.ErrAlreadyExists, id.Dest.bucketReplID())
+	}
+	defer func() {
+		if err != nil {
+			rollbackErr := s.client.SRem(context.Background(), replDestIdxKey, id.Dest.bucketReplID()).Err()
+			if rollbackErr != nil {
+				zerolog.Ctx(ctx).Err(rollbackErr).Msgf("unable to rollback replicaiton dest index %s", id.Dest.bucketReplID())
+			}
+		}
+	}()
+
+	err = s.client.ZIncrBy(ctx, replSrcIdxKey, 1.0, id.Src.bucketReplID()).Err()
+	if err != nil {
+		return fmt.Errorf("%w: unable to update replication src index", err)
+	}
 
 	return nil
 }
 
 func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
+	pipe := s.client.Pipeline()
+	// delete dest routing block if needed
+	if id.Src.Storage == id.Dest.Storage {
+		_ = pipe.Del(ctx, id.Dest.bucketRoutingPolicyID())
+		_ = pipe.SRem(ctx, routingBlockSetKey, id.Dest.String())
+	}
+	// delete indexes
+	_ = pipe.SRem(ctx, replDestIdxKey, id.Dest.bucketReplID()).Err()
+	// delete policy
+	_ = pipe.ZRem(context.Background(), id.Src.bucketReplID(), id.Dest.String()).Err()
+
+	res, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		if err == redis.Nil {
+			return dom.ErrNotFound
+		}
+		return fmt.Errorf("%w: unable to delete replication", err)
+	}
+	for _, r := range res {
+		err = r.Err()
+		if err == nil {
+			continue
+		}
+		if err == redis.Nil {
+			return dom.ErrNotFound
+		}
+		return fmt.Errorf("%w: unable to delete replication", err)
+	}
+	// decrease src index separately because there anre no INC NX inredis
+	// todo: rewrite whole DeleteReplicationPolicy() into single lua script to be atomic.
+	err = luaZIncrByEx.Run(ctx, s.client, []string{replSrcIdxKey}, id.Src.bucketReplID(), -1.0).Err()
+	if err != nil {
+		return fmt.Errorf("%w: unable to delete repl src index for %s", err, id.Src.bucketReplID())
+	}
+	return nil
 }
 
 func (s *policySvc2) DoReplicationSwitch(ctx context.Context, id ReplID) error {
@@ -497,6 +665,10 @@ func (s *policySvc2) GetReplicationSwitch(ctx context.Context, src StorageBucket
 }
 
 func (s *policySvc2) IncReplEvents(ctx context.Context, id ReplID, eventTime time.Time) error {
+	panic("unimplemented")
+}
+
+func (s *policySvc2) AddReplicationInfo(ctx context.Context, id ReplID, agentURL *string) error {
 	panic("unimplemented")
 }
 

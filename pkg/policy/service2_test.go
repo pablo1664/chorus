@@ -2,11 +2,13 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -871,6 +873,122 @@ func TestReplID_validate(t *testing.T) {
 	}
 }
 
+func TestBucketID_validate(t *testing.T) {
+	type fields struct {
+		Account string
+		Bucket  string
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		wantErr bool
+	}{
+		{
+			name: "ok",
+			fields: fields{
+				Account: "a",
+				Bucket:  "b",
+			},
+			wantErr: false,
+		},
+		{
+			name: "acc contains separator",
+			fields: fields{
+				Account: "a:",
+				Bucket:  "b",
+			},
+			wantErr: true,
+		},
+		{
+			name: "bucket contains separator",
+			fields: fields{
+				Account: "a",
+				Bucket:  "b:",
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := BucketID{
+				Account: tt.fields.Account,
+				Bucket:  tt.fields.Bucket,
+			}
+			if err := b.validate(); (err != nil) != tt.wantErr {
+				t.Errorf("BucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStorageBucketID_validate(t *testing.T) {
+	type fields struct {
+		Storage  string
+		BucketID BucketID
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		wantErr bool
+	}{
+		{
+			name: "ok",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "storage contains separator",
+			fields: fields{
+				Storage: "s:",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "account contains separator",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a:",
+					Bucket:  "b",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "bucket contains separator",
+			fields: fields{
+				Storage: "s",
+				BucketID: BucketID{
+					Account: "a",
+					Bucket:  "b:",
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := StorageBucketID{
+				Storage:  tt.fields.Storage,
+				BucketID: tt.fields.BucketID,
+			}
+			if err := b.validate(); (err != nil) != tt.wantErr {
+				t.Errorf("StorageBucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func Test_RoutingPolicy_e2e(t *testing.T) {
 	r := require.New(t)
 	db := miniredis.RunT(t)
@@ -1094,51 +1212,317 @@ func Test_RoutingPolicyBlock_e2e(t *testing.T) {
 	r.Empty(list, "list for unknown account")
 }
 
-func TestBucketID_validate(t *testing.T) {
-	type fields struct {
-		Account string
-		Bucket  string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b := BucketID{
-				Account: tt.fields.Account,
-				Bucket:  tt.fields.Bucket,
-			}
-			if err := b.validate(); (err != nil) != tt.wantErr {
-				t.Errorf("BucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+func Test_lua_luaZIncrByEx(t *testing.T) {
+	r := require.New(t)
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	ctx := context.TODO()
+
+	key := "key"
+	member := "member"
+
+	_, err := luaZIncrByEx.Run(ctx, c, []string{key}, member, 1.0).Result()
+	r.ErrorIs(err, redis.Nil, "return redis.Nil if set and member not exists")
+	r.ErrorIs(c.ZScore(ctx, key, member).Err(), redis.Nil, "set member was not created")
+
+	r.NoError(c.ZAdd(ctx, key, redis.Z{
+		Score:  68,
+		Member: member,
+	}).Err(), "add member to set")
+
+	_, err = luaZIncrByEx.Run(ctx, c, []string{key}, "otherMember", 1.0).Result()
+	r.ErrorIs(err, redis.Nil, "return redis.Nil if set exists and member not exists")
+	r.ErrorIs(c.ZScore(ctx, key, "otherMember").Err(), redis.Nil, "set member was not created")
+
+	res := luaZIncrByEx.Run(ctx, c, []string{key}, member, 1.0)
+	r.NoError(res.Err(), "inc with no err")
+	resFloat, err := res.Float64()
+	r.NoError(err, "float returned")
+	r.EqualValues(69., resFloat, "increased val returned")
+	r.NoError(c.ZScore(ctx, key, member).Err(), "set member is created")
+	r.EqualValues(69., c.ZScore(ctx, key, member).Val(), "set member is created")
 }
 
-func TestStorageBucketID_validate(t *testing.T) {
-	type fields struct {
-		Storage  string
-		BucketID BucketID
+func Test_policySvc2_AddReplicationPolicy(t *testing.T) {
+	storages := map[string]bool{
+		"one":   true,
+		"two":   false,
+		"three": false,
+	}
+	type existing struct {
+		routing     []StorageBucketID
+		replication []ReplID
+	}
+	type args struct {
+		id ReplID
 	}
 	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
+		name     string
+		existing existing
+		args     args
+		wantErr  error
 	}{
-		// TODO: Add test cases.
+		//--------------------------OK: bucket level---------------------------------
+		{
+			name: "ok: bucket-level different storage, same bucket",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: bucket-level: different storage, different bucket",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: bucket-level: different storage, different account",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: bucket-level: same storage, different account",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: bucket-level: same storage, different bucket",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+
+		//--------------------------OK: acc level---------------------------------
+		{
+			name: "ok: acc-level: different storage, same acc",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: acc-level: different storage, different acc",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: acc-level: same storage, different acc",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		//--------------------------OK: storage level---------------------------------
+		{
+			name: "ok: storage-level: different storage",
+			existing: existing{
+				routing:     []StorageBucketID{},
+				replication: []ReplID{},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		// todo: test failures
+		// todo: try to allow same storage acc-level replication
+		// todo: test success cases with existing storages
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := StorageBucketID{
-				Storage:  tt.fields.Storage,
-				BucketID: tt.fields.BucketID,
+			db := miniredis.RunT(t)
+			c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+			ctx := context.TODO()
+			r := require.New(t)
+			s := &policySvc2{
+				client:      c,
+				storages:    storages,
+				mainStorage: "one",
 			}
-			if err := b.validate(); (err != nil) != tt.wantErr {
-				t.Errorf("StorageBucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			for _, route := range tt.existing.routing {
+				r.NoError(s.AddRoutingPolicy(ctx, route.BucketID, route.Storage), "add existing routing", route.String())
+			}
+			for _, repl := range tt.existing.replication {
+				r.NoError(s.AddReplicationPolicy(ctx, repl, tasks.Priority3), "add existing routing", repl.String())
+			}
+			if err := s.AddReplicationPolicy(ctx, tt.args.id, tasks.Priority2); !errors.Is(err, tt.wantErr) {
+				t.Errorf("policySvc2.AddReplicationPolicy() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
