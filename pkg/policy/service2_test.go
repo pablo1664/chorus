@@ -1140,8 +1140,6 @@ func Test_RoutingPolicyBlock_e2e(t *testing.T) {
 
 	r.NoError(s.AddRoutingPolicy(ctx, BucketID{Account: a1, Bucket: b1}, second), "create bucket routing")
 	r.ErrorIs(s.addRoutingBlockPolicy(ctx, BucketID{}), dom.ErrInvalidArg, "cannot block default")
-	r.ErrorIs(s.addRoutingBlockPolicy(ctx, BucketID{Account: a1}), dom.ErrInvalidArg, "cannot block account")
-	r.ErrorIs(s.addRoutingBlockPolicy(ctx, BucketID{Account: a2}), dom.ErrInvalidArg, "cannot block account")
 	r.ErrorIs(s.addRoutingBlockPolicy(ctx, BucketID{Account: a1, Bucket: b1}), dom.ErrAlreadyExists, "cannot block existing")
 	r.NoError(s.addRoutingBlockPolicy(ctx, BucketID{Account: "", Bucket: b1}), "block bucket with no account")
 	r.NoError(s.addRoutingBlockPolicy(ctx, BucketID{Account: a2, Bucket: b2}), "block bucket with account")
@@ -1500,9 +1498,768 @@ func Test_policySvc2_AddReplicationPolicy(t *testing.T) {
 			},
 			wantErr: nil,
 		},
-		// todo: test failures
-		// todo: try to allow same storage acc-level replication
-		// todo: test success cases with existing storages
+		//--------------------------OK: with existing data--------------------------------
+		{
+			name: "ok: same storage 2 buckets repl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b2",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b3",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: same storage 2 accs repl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a3",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok:same storage 2 accs repl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a3",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: diff storages",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: diff accs",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "ok: 2 storages",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "three",
+						BucketID: BucketID{
+							Account: "",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: nil,
+		},
+		// ------------------------------ validation errors -----------------------
+		{
+			name:     "unknown src storage",
+			existing: existing{},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "asdf",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name:     "unknown dest storage",
+			existing: existing{},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "asdf",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name:     "cannot repl acc-level to bucket level",
+			existing: existing{},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name:     "cannot repl bucket level to acc level",
+			existing: existing{},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name:     "src stor cannot be different from routing stor",
+			existing: existing{},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name: "cannot replicate if src is already used as dest",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b2",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b3",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrRoutingBlocked,
+		},
+		{
+			name: "cannot replicate if src is already used as dest on acc lvl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrRoutingBlocked,
+		},
+		{
+			name: "cannot replicate if src acc is already used as dest on stor lvl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a3",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrRoutingBlocked,
+		},
+		{
+			name: "cannot replicate if dest is already used as src",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b2",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b2",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b3",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrRoutingBlocked,
+		},
+		{
+			name: "cannot replicate if dest is already used as src on acc level",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a3",
+							Bucket:  "b1",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name: "cannot replicate acc if dest is already used as src on acc level",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a2",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a3",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name: "cannot replicate if dest is already used as dest",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b3",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name: "cannot replicate if dest is already used as dest on acc lvl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "b3",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "two",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "b1",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
+		{
+			name: "cannot replicate to same storage if it blocks existing bucket repl",
+			existing: existing{
+				routing: []StorageBucketID{},
+				replication: []ReplID{
+					{
+						Src: StorageBucketID{
+							Storage: "one",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+						Dest: StorageBucketID{
+							Storage: "two",
+							BucketID: BucketID{
+								Account: "a1",
+								Bucket:  "b1",
+							},
+						},
+					},
+				},
+			},
+			args: args{
+				id: ReplID{
+					Src: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a2",
+							Bucket:  "",
+						},
+					},
+					Dest: StorageBucketID{
+						Storage: "one",
+						BucketID: BucketID{
+							Account: "a1",
+							Bucket:  "",
+						},
+					},
+				},
+			},
+			wantErr: dom.ErrInvalidArg,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1526,4 +2283,307 @@ func Test_policySvc2_AddReplicationPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_ReplicationPolicy_e2e(t *testing.T) {
+	r := require.New(t)
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	main, second, third, fourth := "main", "second", "third", "fourth"
+	b1, b2, b3, a1, a2, a3 := "b1", "b2", "b3", "a1", "a2", "a3"
+	storages := map[string]bool{
+		main:   true,
+		second: false,
+		third:  false,
+		fourth: false,
+	}
+	ctx := context.TODO()
+
+	s := NewSvc2(storages, c)
+
+	// add different routing policies
+	r.NoError(s.AddRoutingPolicy(ctx, BucketID{
+		Account: a2,
+		Bucket:  "",
+	}, second), "route to second for a2")
+
+	r.NoError(s.AddRoutingPolicy(ctx, BucketID{
+		Account: a2,
+		Bucket:  b1,
+	}, third), "route to third for a2-b1")
+
+	r.NoError(s.AddRoutingPolicy(ctx, BucketID{
+		Account: a3,
+		Bucket:  b1,
+	}, fourth), "route to third for a3-b1")
+
+	// check that routing policies are resolved correctly:
+	route, err := s.GetRoutingPolicy(ctx, BucketID{
+		Account: a1,
+		Bucket:  "",
+	})
+	r.NoError(err, "default routing to main")
+	r.EqualValues(main, route, "default routing to main")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a1,
+		Bucket:  b1,
+	})
+	r.NoError(err, "default routing to main")
+	r.EqualValues(main, route, "default routing to main")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a2,
+		Bucket:  "",
+	})
+	r.NoError(err, "default a2 routing to second")
+	r.EqualValues(second, route, "default a2 routing to second")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a2,
+		Bucket:  b2,
+	})
+	r.NoError(err, "default a2 routing to second")
+	r.EqualValues(second, route, "default a2 routing to second")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a2,
+		Bucket:  b1,
+	})
+	r.NoError(err, "a2-b1 routing to third")
+	r.EqualValues(third, route, "a2-b1 routing to third")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a3,
+		Bucket:  b1,
+	})
+	r.NoError(err, "a3-b1 routing to fourth")
+	r.EqualValues(fourth, route, "a2-b1 routing to fourth")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a3,
+		Bucket:  b2,
+	})
+	r.NoError(err, "a3-b2 fallbacks to main")
+	r.EqualValues(main, route, "a3-b2 fallbacks to main")
+
+	// check violation of routing policies
+	r.ErrorContains(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b1,
+			},
+		},
+	}, tasks.Priority2), "different from routing", "routing not from main")
+
+	r.ErrorContains(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b1,
+			},
+		},
+	}, tasks.Priority2), "different from routing", "routing not from second")
+
+	r.ErrorContains(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b1,
+			},
+		},
+	}, tasks.Priority2), "different from routing", "routing not from third")
+
+	// create replications involving routing policies created earlier
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.PriorityDefault1), "create bucket replication from main")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority2), "create bucket replication from second")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority3), "create bucket replication from third")
+
+	// cannot the same create again
+	r.Error(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.PriorityDefault1), "already exists")
+
+	r.Error(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority2), "already exists")
+
+	r.Error(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority3), "already exists")
+
+	// add acc lvl replications
+
+	r.ErrorContains(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+	}, tasks.Priority2), "different from routing", "routing not from main for acc lvl")
+
+	r.NoError(s.AddRoutingPolicy(ctx, BucketID{
+		Account: a1,
+		Bucket:  "",
+	}, second), "roture to second for a1")
+
+	route, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a1,
+		Bucket:  "",
+	})
+	r.NoError(err)
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+	}, tasks.Priority2), "added acc lvl routing a1 to second")
+
+	r.Error(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+	}, tasks.Priority2), "already exists")
 }

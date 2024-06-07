@@ -91,6 +91,24 @@ func (b StorageBucketID) accountReplID() string {
 	return fmt.Sprintf("p:repl:%s", b.String())
 }
 
+func newStorageBucketIDFromKey(key string) (StorageBucketID, error) {
+	if !strings.HasPrefix(key, "p:repl:") {
+		return StorageBucketID{}, fmt.Errorf("%w: invalid StorageBucketID key %s: prefix is missing", dom.ErrInternal, key)
+	}
+	key = strings.TrimPrefix(key, "p:repl:")
+	keyArr := strings.Split(key, ":")
+	if len(keyArr) != 3 {
+		return StorageBucketID{}, fmt.Errorf("%w: unable to parse StorageBucketID key %s", dom.ErrInternal, key)
+	}
+	return StorageBucketID{
+		Storage: keyArr[0],
+		BucketID: BucketID{
+			Account: keyArr[1],
+			Bucket:  keyArr[2],
+		},
+	}, nil
+}
+
 func (b StorageBucketID) storageReplID() string {
 	b.Bucket = ""
 	b.Account = ""
@@ -348,8 +366,32 @@ func (s *policySvc2) DeleteRoutingPolicy(ctx context.Context, srcID BucketID) er
 }
 
 func (s *policySvc2) addRoutingBlockPolicy(ctx context.Context, srcID BucketID) (err error) {
+	if srcID.Account == "" && srcID.Bucket == "" {
+		return fmt.Errorf("%w: routing block policy cannot block on storage level", dom.ErrInvalidArg)
+	}
 	if srcID.Bucket == "" {
-		return fmt.Errorf("%w: routing block policy can be set only per bucket", dom.ErrInvalidArg)
+		// cannot block account routing if there are bucket replications from it
+		replSourcers, err := s.client.ZRangeWithScores(ctx, replSrcIdxKey, 0, -1).Result()
+		if err != nil {
+			return err
+		}
+		for _, s := range replSourcers {
+			if s.Score <= 0 {
+				continue
+			}
+			existing, ok := s.Member.(string)
+			if !ok {
+				return fmt.Errorf("%w: unable to cast replSrcIndex member to string %+v", dom.ErrInternal, s.Member)
+			}
+			sb, err := newStorageBucketIDFromKey(existing)
+			if err != nil {
+				return fmt.Errorf("%w: unable to check existing repl for routing block", err)
+			}
+			if sb.Account == srcID.Account {
+				return fmt.Errorf("%w: unable to create routing block for %s: already used as a replicatoin source %s", dom.ErrInvalidArg, srcID.bucketRoutingPolicyID(), existing)
+			}
+
+		}
 	}
 	key := srcID.bucketRoutingPolicyID()
 	set := false
@@ -389,6 +431,7 @@ func (s *policySvc2) ListBlockedBuckets(ctx context.Context, account string) (ma
 		if account != "" && account != id.Account {
 			continue
 		}
+		// todo: support account block(not relevant for s3 but will be needed for swift)
 		buckets[id.Bucket] = struct{}{}
 	}
 	return buckets, nil
