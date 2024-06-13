@@ -2471,7 +2471,24 @@ func Test_ReplicationPolicy_e2e(t *testing.T) {
 		},
 	}, tasks.Priority3), "create bucket replication from third")
 
-	// cannot the same create again
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b2,
+			},
+		},
+	}, tasks.PriorityHighest5), "create second bucket replication from third")
+
+	// cannot create the same replciations twice
 	r.Error(s.AddReplicationPolicy(ctx, ReplID{
 		Src: StorageBucketID{
 			Storage: main,
@@ -2552,6 +2569,7 @@ func Test_ReplicationPolicy_e2e(t *testing.T) {
 		Bucket:  "",
 	})
 	r.NoError(err)
+	r.EqualValues(second, route)
 
 	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
 		Src: StorageBucketID{
@@ -2586,4 +2604,373 @@ func Test_ReplicationPolicy_e2e(t *testing.T) {
 			},
 		},
 	}, tasks.Priority2), "already exists")
+
+	// lookup replication policies:
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a3,
+			Bucket:  b3,
+		},
+	})
+	r.ErrorIs(err, dom.ErrNotFound, "no replication found")
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: main,
+		BucketID: BucketID{
+			Account: a3,
+			Bucket:  "",
+		},
+	})
+	r.ErrorIs(err, dom.ErrInvalidArg, "bucket name required")
+
+	repls, err := s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: main,
+		BucketID: BucketID{
+			Account: a3,
+			Bucket:  b2,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.PriorityDefault1, repls[0].Priority)
+	r.EqualValues(second, repls[0].ID.Storage)
+	r.EqualValues(a3, repls[0].ID.Account)
+	r.EqualValues(b3, repls[0].ID.Bucket)
+
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a2,
+			Bucket:  b2,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.Priority2, repls[0].Priority)
+	r.EqualValues(second, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues(b3, repls[0].ID.Bucket)
+
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: third,
+		BucketID: BucketID{
+			Account: a2,
+			Bucket:  b1,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 2)
+	r.EqualValues(tasks.PriorityHighest5, repls[0].Priority)
+	r.EqualValues(fourth, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues(b2, repls[0].ID.Bucket)
+
+	r.EqualValues(tasks.Priority3, repls[1].Priority)
+	r.EqualValues(fourth, repls[1].ID.Storage)
+	r.EqualValues(a1, repls[1].ID.Account)
+	r.EqualValues(b3, repls[1].ID.Bucket)
+
+	// lookup account level replication
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a1,
+			Bucket:  b1,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.Priority2, repls[0].Priority)
+	r.EqualValues(third, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues(b1, repls[0].ID.Bucket)
+
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a1,
+			Bucket:  b2,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.Priority2, repls[0].Priority)
+	r.EqualValues(third, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues(b2, repls[0].ID.Bucket)
+
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a1,
+			Bucket:  b3,
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.Priority2, repls[0].Priority)
+	r.EqualValues(third, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues(b3, repls[0].ID.Bucket)
+
+	repls, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a1,
+			Bucket:  "asdf",
+		},
+	})
+	r.NoError(err)
+	r.Len(repls, 1)
+	r.EqualValues(tasks.Priority2, repls[0].Priority)
+	r.EqualValues(third, repls[0].ID.Storage)
+	r.EqualValues(a1, repls[0].ID.Account)
+	r.EqualValues("asdf", repls[0].ID.Bucket)
+
+	// check that routing to followers is blocked
+	_, err = s.GetRoutingPolicy(ctx, BucketID{
+		Account: a1,
+		Bucket:  b3,
+	})
+	r.ErrorIs(err, dom.ErrRoutingBlocked)
+
+	// delete created policies
+	r.ErrorIs(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  "qwerty",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b3,
+			},
+		},
+	}), dom.ErrNotFound)
+
+	r.ErrorIs(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  "qwerty",
+			},
+		},
+	}), dom.ErrNotFound)
+
+	r.NoError(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b3,
+			},
+		},
+	}), "delete replication from main")
+
+	r.NoError(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}), "delete replication from second")
+	r.NoError(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}), "delete replication from third")
+	r.NoError(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b2,
+			},
+		},
+	}), "delete second replication from third")
+	r.NoError(s.DeleteReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+	}), "delete acc replication")
+
+	// check that replciations were deleted
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: main,
+		BucketID: BucketID{
+			Account: a3,
+			Bucket:  b2,
+		},
+	})
+	r.ErrorIs(err, dom.ErrNotFound)
+
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a2,
+			Bucket:  b2,
+		},
+	})
+	r.ErrorIs(err, dom.ErrNotFound)
+
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: third,
+		BucketID: BucketID{
+			Account: a2,
+			Bucket:  b1,
+		},
+	})
+
+	r.ErrorIs(err, dom.ErrNotFound)
+	_, err = s.GetBucketReplicationPolicies(ctx, StorageBucketID{
+		Storage: second,
+		BucketID: BucketID{
+			Account: a1,
+			Bucket:  b1,
+		},
+	})
+	r.ErrorIs(err, dom.ErrNotFound)
+
+	// create once again to check that everything were properly deleted
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a3,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.PriorityDefault1), "create bucket replication from main")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b2,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority2), "create bucket replication from second")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b3,
+			},
+		},
+	}, tasks.Priority3), "create bucket replication from third")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: fourth,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b2,
+			},
+		},
+	}, tasks.PriorityHighest5), "create second bucket replication from third")
+
+	r.NoError(s.AddReplicationPolicy(ctx, ReplID{
+		Src: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  "",
+			},
+		},
+	}, tasks.Priority2), "added acc lvl routing a1 to second")
 }

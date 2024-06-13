@@ -2,7 +2,9 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -510,6 +512,16 @@ func (s *policySvc2) GetBucketReplicationPolicies(ctx context.Context, srcID Sto
 	if len(destinations) == 0 {
 		return nil, dom.ErrNotFound
 	}
+	// sort result
+	sort.Slice(destinations, func(i, j int) bool {
+		if destinations[i].ID.Storage != destinations[j].ID.Storage {
+			return destinations[i].ID.Storage < destinations[j].ID.Storage
+		}
+		if destinations[i].ID.Account != destinations[j].ID.Account {
+			return destinations[i].ID.Account < destinations[j].ID.Account
+		}
+		return destinations[i].ID.Bucket < destinations[j].ID.Bucket
+	})
 	return destinations, nil
 }
 
@@ -658,6 +670,16 @@ func (s *policySvc2) AddReplicationPolicy(ctx context.Context, id ReplID, priori
 }
 
 func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) error {
+	removed, err := s.client.ZRem(ctx, id.Src.bucketReplID(), id.Dest.String()).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return dom.ErrNotFound
+		}
+		return err
+	}
+	if removed == 0 {
+		return dom.ErrNotFound
+	}
 	pipe := s.client.Pipeline()
 	// delete dest routing block if needed
 	if id.Src.Storage == id.Dest.Storage {
@@ -666,33 +688,24 @@ func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) err
 	}
 	// delete indexes
 	_ = pipe.SRem(ctx, replDestIdxKey, id.Dest.bucketReplID()).Err()
-	// delete policy
-	_ = pipe.ZRem(context.Background(), id.Src.bucketReplID(), id.Dest.String()).Err()
 
+	var mErr error
 	res, err := pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		if err == redis.Nil {
-			return dom.ErrNotFound
-		}
-		return fmt.Errorf("%w: unable to delete replication", err)
+	if err != nil {
+		mErr = errors.Join(mErr, fmt.Errorf("%w: unable to delete replication: pipe failed", err))
 	}
 	for _, r := range res {
-		err = r.Err()
-		if err == nil {
-			continue
+		if r.Err() != nil {
+			mErr = errors.Join(mErr, fmt.Errorf("%w: unable to delete replication: pipe command %s failed", err, r.String()))
 		}
-		if err == redis.Nil {
-			return dom.ErrNotFound
-		}
-		return fmt.Errorf("%w: unable to delete replication", err)
 	}
 	// decrease src index separately because there anre no INC NX inredis
 	// todo: rewrite whole DeleteReplicationPolicy() into single lua script to be atomic.
 	err = luaZIncrByEx.Run(ctx, s.client, []string{replSrcIdxKey}, id.Src.bucketReplID(), -1.0).Err()
 	if err != nil {
-		return fmt.Errorf("%w: unable to delete repl src index for %s", err, id.Src.bucketReplID())
+		mErr = errors.Join(mErr, fmt.Errorf("%w: unable to delete repl src index for %s", err, id.Src.bucketReplID()))
 	}
-	return nil
+	return mErr
 }
 
 func (s *policySvc2) DoReplicationSwitch(ctx context.Context, id ReplID) error {
