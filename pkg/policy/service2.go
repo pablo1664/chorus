@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ const (
 	// replDestIdxKey - redis key for replication destinations index represented as Set.
 	// Where each set member is destination id.
 	replDestIdxKey = "p:repl-idx:dest"
+	// replDestIdxKey = redis key for exising replication statuses
+	replStatusIdxKey = "p:repl-idx:st"
 )
 
 // BucketID - points to a group of objects in terms of object storage (bucket, container, directory)
@@ -130,8 +133,38 @@ type ReplID struct {
 	Src, Dest StorageBucketID
 }
 
-func (r ReplID) String() string {
-	return r.Src.String() + "->" + r.Dest.String()
+func replIDfromKey(key string) ReplID {
+	if key == "" {
+		return ReplID{}
+	}
+	splits := strings.Split(key, ":")
+	if len(splits) != 6 {
+		panic(fmt.Sprintf("invalid repl key %s", key))
+	}
+	return ReplID{
+		Src: StorageBucketID{
+			Storage: splits[0],
+			BucketID: BucketID{
+				Account: splits[1],
+				Bucket:  splits[2],
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: splits[3],
+			BucketID: BucketID{
+				Account: splits[4],
+				Bucket:  splits[5],
+			},
+		},
+	}
+}
+
+func (r ReplID) key() string {
+	return r.Src.String() + ":" + r.Dest.String()
+}
+
+func (r ReplID) statusKey() string {
+	return "p:repl_st:" + r.key()
 }
 
 func (r ReplID) validate() error {
@@ -157,6 +190,11 @@ func (r ReplID) validate() error {
 		return fmt.Errorf("%w: cannot replicate to itself", dom.ErrInvalidArg)
 	}
 	return nil
+}
+
+type ReplicationStatusExtended struct {
+	ReplicationPolicyStatus
+	ReplID
 }
 
 type Service2 interface {
@@ -202,13 +240,15 @@ type Service2 interface {
 
 	// AddReplicationInfo - creates mutable metadata for bucket replication policy.
 	AddReplicationInfo(ctx context.Context, id ReplID, agentURL *string) error
+	// DeleteReplicationInfo - deletes bucket replication metadata.
+	DeleteReplicationInfo(ctx context.Context, id ReplID) error
 
 	// GetReplicationPolicyInfo - returns replication status.
 	// Possible errors:
 	//  dom.ErrNotFound - no replication policy found.
-	GetReplicationPolicyInfo(ctx context.Context, id ReplID) (ReplicationPolicyStatus, error)
+	GetReplicationInfo(ctx context.Context, id ReplID) (ReplicationPolicyStatus, error)
 	// ListReplicationPolicyInfo - returns all replication policies with status.
-	ListReplicationPolicyInfo(ctx context.Context) ([]ReplicationPolicyStatusExtended, error)
+	ListReplicationPolicyInfo(ctx context.Context) ([]ReplicationStatusExtended, error)
 	// IsReplicationPolicyExists - checks if given policy exists.
 	IsReplicationPolicyExists(ctx context.Context, id ReplID) (bool, error)
 	// IsReplicationPolicyPaused - returns true if given replication is paused.
@@ -708,66 +748,369 @@ func (s *policySvc2) DeleteReplicationPolicy(ctx context.Context, id ReplID) err
 	return mErr
 }
 
-func (s *policySvc2) DoReplicationSwitch(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
+func (s *policySvc2) AddReplicationInfo(ctx context.Context, id ReplID, agentURL *string) error {
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	// check if repl policy exists
+	pipe := s.client.Pipeline()
+	floatRes := []*redis.FloatCmd{
+		pipe.ZScore(ctx, id.Src.bucketReplID(), fmt.Sprintf("%s:%s:%s", id.Dest.Storage, id.Dest.Account, id.Dest.Bucket)), // bucket level
+		pipe.ZScore(ctx, id.Src.accountReplID(), fmt.Sprintf("%s:%s:%s", id.Dest.Storage, id.Dest.Account, "")),            // acc level
+		pipe.ZScore(ctx, id.Src.storageReplID(), fmt.Sprintf("%s:%s:%s", id.Dest.Storage, "", "")),                         // storage level
+	}
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("%w: unable to find replication policy: %s", dom.ErrInvalidArg, err.Error())
+	}
+	existis := false
+	for _, res := range floatRes {
+		if res.Err() != nil {
+			continue
+		}
+		existis = true
+		break
+	}
+	if !existis {
+		return fmt.Errorf("%w: unable to find replication policy", dom.ErrInvalidArg)
+	}
+	// todo: add to idx. if added then crete hset
+	added, err := s.client.SAdd(ctx, replStatusIdxKey, id.key()).Result()
+	if err != nil {
+		return err
+	}
+	if added == 0 {
+		return dom.ErrAlreadyExists
+	}
+	err = s.client.HSet(ctx, id.statusKey(), ReplicationPolicyStatus{
+		CreatedAt: time.Now().UTC(),
+		AgentURL:  fromStrPtr(agentURL),
+	}).Err()
+	if err != nil {
+		return fmt.Errorf("%w: unable to create repl status", err)
+	}
+	return nil
 }
 
-func (s *policySvc2) GetReplicationPolicyInfo(ctx context.Context, id ReplID) (ReplicationPolicyStatus, error) {
-	panic("unimplemented")
+func (s *policySvc2) GetReplicationInfo(ctx context.Context, id ReplID) (ReplicationPolicyStatus, error) {
+	if err := id.validate(); err != nil {
+		return ReplicationPolicyStatus{}, err
+	}
+	if id.Src.Bucket == "" {
+		return ReplicationPolicyStatus{}, fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	res := ReplicationPolicyStatus{}
+	err := s.client.HGetAll(ctx, id.statusKey()).Scan(&res)
+	if err != nil {
+		if err == redis.Nil {
+			return ReplicationPolicyStatus{}, dom.ErrNotFound
+		}
+		return ReplicationPolicyStatus{}, err
+	}
+	if res.CreatedAt.IsZero() {
+		return ReplicationPolicyStatus{}, fmt.Errorf("%w: no replication policy status", dom.ErrNotFound)
+	}
+
+	return res, nil
 }
 
-func (s *policySvc2) GetReplicationSwitch(ctx context.Context, src StorageBucketID) (ReplicationSwitch, error) {
-	panic("unimplemented")
+func (s *policySvc2) DeleteReplicationInfo(ctx context.Context, id ReplID) error {
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+	pipe := s.client.Pipeline()
+	res := []*redis.IntCmd{
+		pipe.Del(ctx, id.statusKey()),
+		pipe.SRem(ctx, replStatusIdxKey, id.key()),
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		if err == redis.Nil {
+			return dom.ErrNotFound
+		}
+		return fmt.Errorf("%w: unable to find replication policy", err)
+	}
+	for _, v := range res {
+		if v.Val() == 0 {
+			return dom.ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (s *policySvc2) ListReplicationPolicyInfo(ctx context.Context) ([]ReplicationStatusExtended, error) {
+	list, err := s.client.SMembers(ctx, replStatusIdxKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil
+		}
+		return nil, err
+	}
+	pipe := s.client.Pipeline()
+	resCmd := make([]*redis.MapStringStringCmd, len(list))
+	for i, k := range list {
+		resCmd[i] = pipe.HGetAll(ctx, "p:repl_st:"+k)
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]ReplicationStatusExtended, len(list))
+	for i, v := range resCmd {
+		err = v.Scan(&res[i].ReplicationPolicyStatus)
+		if err != nil {
+			return nil, fmt.Errorf("%w: unable to parse replication status for %s", err, list[i])
+		}
+		res[i].ReplID = replIDfromKey(list[i])
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].CreatedAt.Before(res[j].CreatedAt)
+	})
+	return res, nil
 }
 
 func (s *policySvc2) IncReplEvents(ctx context.Context, id ReplID, eventTime time.Time) error {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	err := s.incIfKeyExists(ctx, id.statusKey(), "events", 1)
+	if err != nil {
+		return err
+	}
+
+	err = s.client.HSet(ctx, id.statusKey(), "last_emitted_at", eventTime.UTC()).Err()
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to update last_emitted_at for event replication")
+	}
+	return nil
 }
 
-func (s *policySvc2) AddReplicationInfo(ctx context.Context, id ReplID, agentURL *string) error {
-	panic("unimplemented")
+func (s *policySvc2) incIfKeyExists(ctx context.Context, key, field string, val int64) (err error) {
+	result, err := luaHIncrByEx.Run(ctx, s.client, []string{key}, field, val).Result()
+	if err != nil {
+		return err
+	}
+	inc, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("%w: unable to cast luaHIncrByEx result %T to int64", dom.ErrInternal, result)
+	}
+	if inc == 0 {
+		return dom.ErrNotFound
+	}
+	return nil
 }
 
 func (s *policySvc2) IncReplEventsDone(ctx context.Context, id ReplID, eventTime time.Time) error {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	key := id.statusKey()
+	err := s.incIfKeyExists(ctx, key, "events_done", 1)
+	if err != nil {
+		return err
+	}
+
+	s.updateProcessedAt(ctx, key, eventTime)
+	return nil
+}
+
+func (s *policySvc2) updateProcessedAt(ctx context.Context, key string, eventTime time.Time) {
+	result, err := luaUpdateTsIfGreater.Run(ctx, s.client, []string{key}, "last_processed_at", eventTime.UTC().Format(time.RFC3339Nano)).Result()
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to update policy last_processed_at")
+		return
+	}
+	inc, ok := result.(int64)
+	if !ok {
+		zerolog.Ctx(ctx).Error().Msgf("unable to cast luaUpdateTsIfGreater result %T to int64", result)
+		return
+	}
+	if inc == 0 {
+		zerolog.Ctx(ctx).Info().Msg("policy last_processed_at is not updated")
+	}
 }
 
 func (s *policySvc2) IncReplInitObjDone(ctx context.Context, id ReplID, bytes int64, eventTime time.Time) error {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	key := id.statusKey()
+	err := s.incIfKeyExists(ctx, key, "obj_done", 1)
+	if err != nil {
+		return err
+	}
+	if bytes != 0 {
+		err = s.incIfKeyExists(ctx, key, "bytes_done", bytes)
+		if err != nil {
+			return err
+		}
+	}
+	s.updateProcessedAt(ctx, key, eventTime)
+
+	updated, err := s.client.HMGet(ctx, key, "obj_listed", "obj_done").Result()
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to get updated replication policy status")
+		return nil
+	}
+	if len(updated) == 2 {
+		listedStr, ok := updated[0].(string)
+		if !ok || listedStr == "" {
+			return nil
+		}
+		listed, err := strconv.Atoi(listedStr)
+		if err != nil {
+			return nil
+		}
+
+		doneStr, ok := updated[1].(string)
+		if !ok || doneStr == "" {
+			return nil
+		}
+		done, err := strconv.Atoi(doneStr)
+		if err != nil {
+			return nil
+		}
+		if listed > done {
+			return nil
+		}
+		err = s.client.HSetNX(ctx, key, "init_done_at", time.Now().UTC()).Err()
+		if err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("unable to set init_done_at for replication policy status")
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *policySvc2) IncReplInitObjListed(ctx context.Context, id ReplID, bytes int64, eventTime time.Time) error {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+
+	key := id.statusKey()
+	err := s.incIfKeyExists(ctx, key, "obj_listed", 1)
+	if err != nil {
+		return err
+	}
+	err = s.client.HSet(ctx, key, "last_emitted_at", eventTime.UTC()).Err()
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("unable to update last_emitted_at for init replication")
+	}
+	if bytes != 0 {
+		return s.incIfKeyExists(ctx, key, "bytes_listed", bytes)
+	}
+	return nil
 }
 
 func (s *policySvc2) IsReplicationPolicyExists(ctx context.Context, id ReplID) (bool, error) {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return false, err
+	}
+	if id.Src.Bucket == "" {
+		return false, fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+	res, err := s.client.Exists(ctx, id.statusKey()).Result()
+	if err != nil {
+		return false, err
+	}
+	return res == 1, nil
 }
 
 func (s *policySvc2) IsReplicationPolicyPaused(ctx context.Context, id ReplID) (bool, error) {
-	panic("unimplemented")
-}
-
-func (s *policySvc2) IsReplicationSwitchInProgress(ctx context.Context, src StorageBucketID) (bool, error) {
-	panic("unimplemented")
-}
-
-func (s *policySvc2) ListReplicationPolicyInfo(ctx context.Context) ([]ReplicationPolicyStatusExtended, error) {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return false, err
+	}
+	if id.Src.Bucket == "" {
+		return false, fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+	paused, err := s.client.HGet(ctx, id.statusKey(), "paused").Bool()
+	if err != nil {
+		if err == redis.Nil {
+			return false, dom.ErrNotFound
+		}
+		return false, err
+	}
+	return paused, nil
 }
 
 func (s *policySvc2) ObjListStarted(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
+	if err := id.validate(); err != nil {
+		return err
+	}
+	if id.Src.Bucket == "" {
+		return fmt.Errorf("%w: bucket name is required to replication info", dom.ErrInvalidArg)
+	}
+	return s.hSetKeyExists(ctx, id.statusKey(), "listing_started", true)
+}
+
+func (s *policySvc2) hSetKeyExists(ctx context.Context, key, field string, val interface{}) (err error) {
+	result, err := luaHSetEx.Run(ctx, s.client, []string{key}, field, val).Result()
+	if err != nil {
+		return err
+	}
+	inc, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("%w: unable to cast luaHSetEx result %T to int64", dom.ErrInternal, result)
+	}
+	if inc == 0 {
+		return dom.ErrNotFound
+	}
+	return nil
 }
 
 func (s *policySvc2) PauseReplication(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
-}
-
-func (s *policySvc2) ReplicationSwitchDone(ctx context.Context, src StorageBucketID) error {
-	panic("unimplemented")
+	err := s.hSetKeyExists(ctx, id.statusKey(), "paused", true)
+	if err != nil {
+		return fmt.Errorf("%w: unable to pause replication", err)
+	}
+	return nil
 }
 
 func (s *policySvc2) ResumeReplication(ctx context.Context, id ReplID) error {
-	panic("unimplemented")
+	err := s.hSetKeyExists(ctx, id.statusKey(), "paused", false)
+	if err != nil {
+		return fmt.Errorf("%w: unable to pause replication", err)
+	}
+	return nil
+}
+
+func (s *policySvc2) IsReplicationSwitchInProgress(ctx context.Context, src StorageBucketID) (bool, error) {
+	// todo: implement
+	return false, nil
+}
+
+func (s *policySvc2) DoReplicationSwitch(ctx context.Context, id ReplID) error {
+	return dom.ErrNotImplemented
+}
+
+func (s *policySvc2) GetReplicationSwitch(ctx context.Context, src StorageBucketID) (ReplicationSwitch, error) {
+	return ReplicationSwitch{}, dom.ErrNotImplemented
+}
+
+func (s *policySvc2) ReplicationSwitchDone(ctx context.Context, src StorageBucketID) error {
+	return dom.ErrNotImplemented
 }

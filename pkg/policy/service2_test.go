@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/clyso/chorus/pkg/dom"
@@ -984,6 +985,121 @@ func TestStorageBucketID_validate(t *testing.T) {
 			}
 			if err := b.validate(); (err != nil) != tt.wantErr {
 				t.Errorf("StorageBucketID.validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func Test_replIDfromKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want ReplID
+	}{
+		{
+			name: "success",
+			key:  "s1:a1:b1:s2:a2:b2",
+			want: ReplID{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replIDfromKey(tt.key); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("replIDfromKey() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_replIDKeyE2E(t *testing.T) {
+	tests := []struct {
+		name string
+		want ReplID
+	}{
+		{
+			name: "success",
+			want: ReplID{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := tt.want.key()
+			if got := replIDfromKey(key); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("replIDfromKey() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplID_statusKey(t *testing.T) {
+	type fields struct {
+		Src  StorageBucketID
+		Dest StorageBucketID
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "success",
+			fields: fields{
+				Src: StorageBucketID{
+					Storage: "s1",
+					BucketID: BucketID{
+						Account: "a1",
+						Bucket:  "b1",
+					},
+				},
+				Dest: StorageBucketID{
+					Storage: "s2",
+					BucketID: BucketID{
+						Account: "a2",
+						Bucket:  "b2",
+					},
+				},
+			},
+			want: "p:repl_st:s1:a1:b1:s2:a2:b2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ReplID{
+				Src:  tt.fields.Src,
+				Dest: tt.fields.Dest,
+			}
+			if got := r.statusKey(); got != tt.want {
+				t.Errorf("ReplID.statusKey() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2276,7 +2392,7 @@ func Test_policySvc2_AddReplicationPolicy(t *testing.T) {
 				r.NoError(s.AddRoutingPolicy(ctx, route.BucketID, route.Storage), "add existing routing", route.String())
 			}
 			for _, repl := range tt.existing.replication {
-				r.NoError(s.AddReplicationPolicy(ctx, repl, tasks.Priority3), "add existing routing", repl.String())
+				r.NoError(s.AddReplicationPolicy(ctx, repl, tasks.Priority3), "add existing routing", repl.key())
 			}
 			if err := s.AddReplicationPolicy(ctx, tt.args.id, tasks.Priority2); !errors.Is(err, tt.wantErr) {
 				t.Errorf("policySvc2.AddReplicationPolicy() error = %v, wantErr %v", err, tt.wantErr)
@@ -2973,4 +3089,371 @@ func Test_ReplicationPolicy_e2e(t *testing.T) {
 			},
 		},
 	}, tasks.Priority2), "added acc lvl routing a1 to second")
+}
+
+func Test_ReplicationPolicyStatus_e2e(t *testing.T) {
+	r := require.New(t)
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	main, second, third := "main", "second", "third"
+	b1, a1, a2 := "b1", "a1", "a2"
+	ag1, ag2 := "http://ag1.com", "http://ag2.com"
+	storages := map[string]bool{
+		main:   true,
+		second: false,
+		third:  false,
+	}
+	ctx := context.TODO()
+
+	s := NewSvc2(storages, c)
+
+	id1 := ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a1,
+				Bucket:  b1,
+			},
+		},
+	}
+
+	id2 := ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: second,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+	}
+	id3 := ReplID{
+		Src: StorageBucketID{
+			Storage: main,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+		Dest: StorageBucketID{
+			Storage: third,
+			BucketID: BucketID{
+				Account: a2,
+				Bucket:  b1,
+			},
+		},
+	}
+
+	// create replication policies
+	idAcc := id1
+	idAcc.Src.Bucket = ""
+	idAcc.Dest.Bucket = ""
+	r.NoError(s.AddReplicationPolicy(ctx, idAcc, tasks.Priority2), "added acc lvl routing")
+	r.NoError(s.AddReplicationPolicy(ctx, id2, tasks.Priority3), "added bucket lvl routing")
+	r.NoError(s.AddReplicationPolicy(ctx, id3, tasks.Priority4), "added bucket lvl routing")
+
+	// check that status not exists
+	list, err := s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Empty(list, "status not exists")
+
+	_, err = s.GetReplicationInfo(ctx, id1)
+	r.ErrorIs(err, dom.ErrNotFound, "status not exisis")
+
+	_, err = s.GetReplicationInfo(ctx, id2)
+	r.ErrorIs(err, dom.ErrNotFound, "status not exisis")
+
+	_, err = s.GetReplicationInfo(ctx, id3)
+	r.ErrorIs(err, dom.ErrNotFound, "status not exisis")
+
+	// add status validation
+	r.ErrorIs(s.AddReplicationInfo(ctx, idAcc, nil), dom.ErrInvalidArg, "bucket required")
+
+	idNoPolicy := id2
+	idNoPolicy.Src.Bucket = "asdf"
+	idNoPolicy.Dest.Bucket = "asdf"
+	r.ErrorIs(s.AddReplicationInfo(ctx, idNoPolicy, nil), dom.ErrInvalidArg, "repl policy should be presented")
+
+	r.ErrorIs(s.PauseReplication(ctx, id2), dom.ErrNotFound)
+	r.ErrorIs(s.ResumeReplication(ctx, id2), dom.ErrNotFound)
+	r.ErrorIs(s.ObjListStarted(ctx, id2), dom.ErrNotFound)
+	r.ErrorIs(s.IncReplEvents(ctx, id2, time.Now()), dom.ErrNotFound)
+	r.ErrorIs(s.IncReplEventsDone(ctx, id2, time.Now()), dom.ErrNotFound)
+	r.ErrorIs(s.IncReplInitObjListed(ctx, id2, 5, time.Now()), dom.ErrNotFound)
+	r.ErrorIs(s.IncReplInitObjDone(ctx, id2, 5, time.Now()), dom.ErrNotFound)
+
+	r.NoError(s.AddReplicationInfo(ctx, id1, &ag1))
+	r.ErrorIs(s.AddReplicationInfo(ctx, id1, nil), dom.ErrAlreadyExists)
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 1)
+
+	r.NoError(s.AddReplicationInfo(ctx, id2, &ag2))
+	r.ErrorIs(s.AddReplicationInfo(ctx, id2, nil), dom.ErrAlreadyExists)
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 2)
+
+	r.NoError(s.AddReplicationInfo(ctx, id3, nil))
+	r.ErrorIs(s.AddReplicationInfo(ctx, id3, nil), dom.ErrAlreadyExists)
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 3)
+
+	r.EqualValues(id1, list[0].ReplID)
+	r.EqualValues(id2, list[1].ReplID)
+	r.EqualValues(id3, list[2].ReplID)
+
+	ri, err := s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.False(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.PauseReplication(ctx, id1))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.True(ri.IsPaused)
+	r.False(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.ResumeReplication(ctx, id1))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.False(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.ObjListStarted(ctx, id1))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.True(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.IncReplEvents(ctx, id1, time.Now()))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.True(ri.ListingStarted)
+	r.EqualValues(1, ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.IncReplEventsDone(ctx, id1, time.Now()))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.True(ri.ListingStarted)
+	r.EqualValues(1, ri.Events)
+	r.EqualValues(1, ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.IncReplInitObjListed(ctx, id1, 5, time.Now()))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.True(ri.ListingStarted)
+	r.EqualValues(1, ri.Events)
+	r.EqualValues(1, ri.EventsDone)
+	r.EqualValues(1, ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.EqualValues(5, ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	r.NoError(s.IncReplInitObjDone(ctx, id1, 7, time.Now()))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.True(ri.ListingStarted)
+	r.EqualValues(1, ri.Events)
+	r.EqualValues(1, ri.EventsDone)
+	r.EqualValues(1, ri.InitObjListed)
+	r.EqualValues(1, ri.InitObjDone)
+	r.EqualValues(5, ri.InitBytesListed)
+	r.EqualValues(7, ri.InitBytesDone)
+	r.EqualValues(ag1, ri.AgentURL)
+
+	ri, err = s.GetReplicationInfo(ctx, id2)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.False(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.EqualValues(ag2, ri.AgentURL)
+
+	ri, err = s.GetReplicationInfo(ctx, id3)
+	r.NoError(err)
+	r.False(ri.CreatedAt.IsZero())
+	r.False(ri.IsPaused)
+	r.False(ri.ListingStarted)
+	r.Zero(ri.Events)
+	r.Zero(ri.EventsDone)
+	r.Zero(ri.InitObjListed)
+	r.Zero(ri.InitObjDone)
+	r.Zero(ri.InitBytesListed)
+	r.Zero(ri.InitBytesDone)
+	r.Empty(ri.AgentURL)
+
+	// delete statuses
+	r.ErrorIs(s.DeleteReplicationInfo(ctx, idNoPolicy), dom.ErrNotFound)
+
+	r.NoError(s.DeleteReplicationInfo(ctx, id1))
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 2)
+	r.ErrorIs(s.DeleteReplicationInfo(ctx, id1), dom.ErrNotFound)
+
+	r.NoError(s.DeleteReplicationInfo(ctx, id2))
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 1)
+
+	r.NoError(s.DeleteReplicationInfo(ctx, id3))
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Empty(list)
+
+	// create again
+	ag21, ag22, ag23 := "ag21", "ag22", "ag23"
+	r.NoError(s.AddReplicationInfo(ctx, id1, &ag21))
+	ri, err = s.GetReplicationInfo(ctx, id1)
+	r.NoError(err)
+	r.EqualValues(ag21, ri.AgentURL)
+	r.NoError(s.AddReplicationInfo(ctx, id2, &ag22))
+	ri, err = s.GetReplicationInfo(ctx, id2)
+	r.NoError(err)
+	r.EqualValues(ag22, ri.AgentURL)
+	r.NoError(s.AddReplicationInfo(ctx, id3, &ag23))
+	ri, err = s.GetReplicationInfo(ctx, id3)
+	r.NoError(err)
+	r.EqualValues(ag23, ri.AgentURL)
+
+	list, err = s.ListReplicationPolicyInfo(ctx)
+	r.NoError(err)
+	r.Len(list, 3)
+	r.EqualValues(ag21, list[0].AgentURL)
+	r.EqualValues(ag22, list[1].AgentURL)
+	r.EqualValues(ag23, list[2].AgentURL)
+}
+
+func Test_policySvc2_hSetKeyExists(t *testing.T) {
+	r := require.New(t)
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	main, second := "main", "second"
+	storages := map[string]bool{
+		main:   true,
+		second: false,
+	}
+	ctx := context.TODO()
+	s := NewSvc2(storages, c)
+
+	exists, err := s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(0, exists)
+	r.ErrorIs(s.hSetKeyExists(ctx, "key", "field", "val"), dom.ErrNotFound, "no update if no redis hash")
+	exists, err = s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(0, exists)
+
+	r.NoError(s.client.HSet(ctx, "key", "field", "val").Err(), "create hash first")
+	r.NoError(s.hSetKeyExists(ctx, "key", "field", "val2"), "no update if redis hash exists")
+	val, err := s.client.HGet(ctx, "key", "field").Result()
+	r.NoError(err)
+	r.EqualValues("val2", val, "value updated")
+
+	exists, err = s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(1, exists)
+}
+
+func Test_policySvc2_incIfKeyExists(t *testing.T) {
+	r := require.New(t)
+	db := miniredis.RunT(t)
+	c := redis.NewClient(&redis.Options{Addr: db.Addr()})
+	main, second := "main", "second"
+	storages := map[string]bool{
+		main:   true,
+		second: false,
+	}
+	ctx := context.TODO()
+	s := NewSvc2(storages, c)
+
+	exists, err := s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(0, exists)
+	r.ErrorIs(s.incIfKeyExists(ctx, "key", "field", 7), dom.ErrNotFound, "no update if no redis hash")
+	exists, err = s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(0, exists)
+
+	r.NoError(s.client.HSet(ctx, "key", "field", 3).Err(), "create hash first")
+	r.NoError(s.incIfKeyExists(ctx, "key", "field", 7), "no update if redis hash exists")
+	val, err := s.client.HGet(ctx, "key", "field").Result()
+	r.NoError(err)
+	r.EqualValues("10", val, "value updated")
+
+	exists, err = s.client.Exists(ctx, "key").Result()
+	r.NoError(err)
+	r.EqualValues(1, exists)
 }
