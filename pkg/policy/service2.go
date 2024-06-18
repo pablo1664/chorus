@@ -26,6 +26,11 @@ const (
 	replStatusIdxKey = "p:repl-idx:st"
 )
 
+const (
+	routingBlock       = "-"
+	routingBlockSetKey = "p:routing-block-set"
+)
+
 // BucketID - points to a group of objects in terms of object storage (bucket, container, directory)
 type BucketID struct {
 	// Account - for SWIFT - account, for S3 - empty.
