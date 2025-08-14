@@ -21,12 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	xctx "github.com/clyso/chorus/pkg/ctx"
-	"github.com/clyso/chorus/pkg/dom"
-	"github.com/clyso/chorus/pkg/metrics"
-	"github.com/clyso/chorus/pkg/ratelimit"
-	"github.com/clyso/chorus/pkg/s3"
-	"github.com/clyso/chorus/pkg/util"
+
 	_ "github.com/rclone/rclone/backend/s3"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -37,12 +32,20 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+
+	xctx "github.com/clyso/chorus/pkg/ctx"
+	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/metrics"
+	"github.com/clyso/chorus/pkg/ratelimit"
+	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/util"
 )
 
 type File struct {
 	Storage string
 	Bucket  string
 	Name    string
+	Version string
 }
 
 type CompareRes struct {
@@ -65,7 +68,7 @@ func (f File) path() string {
 type Service interface {
 	CopyTo(ctx context.Context, from, to File, size int64) error
 
-	Compare(ctx context.Context, listMatch bool, from, to, bucket string) (*CompareRes, error)
+	Compare(ctx context.Context, listMatch bool, from, to, fromBucket string, toBucket string) (*CompareRes, error)
 }
 
 func New(conf *s3.StorageConfig, jsonLog bool, metricsSvc metrics.S3Service, mamCalc *MemCalculator, memLimiter, fileLimiter ratelimit.Semaphore) (Service, error) {
@@ -77,7 +80,7 @@ func New(conf *s3.StorageConfig, jsonLog bool, metricsSvc metrics.S3Service, mam
 		return nil, err
 	}
 
-	s := svc{s3: s3, _configs: make(map[string]*configmap.Map, len(conf.Storages)), metricsSvc: metricsSvc, mamCalc: mamCalc, memLimiter: memLimiter, fileLimiter: fileLimiter}
+	s := svc{s3: s3, _configs: make(map[string]*configmap.Map, len(conf.Storages)), metricsSvc: metricsSvc, memCalc: mamCalc, memLimiter: memLimiter, fileLimiter: fileLimiter}
 
 	for storName, stor := range conf.Storages {
 		for user, cred := range stor.Credentials {
@@ -94,7 +97,7 @@ func New(conf *s3.StorageConfig, jsonLog bool, metricsSvc metrics.S3Service, mam
 				vStr := fmt.Sprint(v)
 				scm.Set(k, vStr)
 			}
-			cm := fs.ConfigMap(s3, name, scm)
+			cm := fs.ConfigMap(s3.Prefix, s3.Options, name, scm)
 			s._configs[name] = cm
 		}
 	}
@@ -123,7 +126,7 @@ type svc struct {
 	_configs   map[string]*configmap.Map
 	metricsSvc metrics.S3Service
 
-	mamCalc     *MemCalculator
+	memCalc     *MemCalculator
 	memLimiter  ratelimit.Semaphore
 	fileLimiter ratelimit.Semaphore
 }
@@ -137,16 +140,16 @@ func (s *svc) getConf(storage, user string) (*configmap.Map, error) {
 	return res, nil
 }
 
-func (s *svc) Compare(ctx context.Context, listMatch bool, from, to, bucket string) (*CompareRes, error) {
+func (s *svc) Compare(ctx context.Context, listMatch bool, from, to, fromBucket string, toBucket string) (*CompareRes, error) {
 	ctx, span := otel.Tracer("").Start(ctx, "rclone.Compare")
-	span.SetAttributes(attribute.String("bucket", bucket), attribute.String("from", from), attribute.String("to", to))
+	span.SetAttributes(attribute.String("bucket", fromBucket), attribute.String("from", from), attribute.String("to", to))
 	defer span.End()
 
-	src, err := s.getFS(ctx, from, bucket)
+	src, err := s.getFS(ctx, from, fromBucket)
 	if err != nil {
 		return nil, err
 	}
-	dest, err := s.getFS(ctx, to, bucket)
+	dest, err := s.getFS(ctx, to, toBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +188,7 @@ func (s *svc) Compare(ctx context.Context, listMatch bool, from, to, bucket stri
 	return &CompareRes{
 		SrcStor:  from,
 		DestStor: to,
-		Bucket:   bucket,
+		Bucket:   fromBucket,
 		IsMatch:  err == nil,
 		MissFrom: readFileNames(missingSrcBuf.Bytes()),
 		MissTo:   readFileNames(missingDstBuf.Bytes()),
@@ -280,7 +283,7 @@ func (s *svc) checkLimit(ctx context.Context, fileSize int64) (release func(), e
 		}
 	}()
 
-	reserve := s.mamCalc.calcMemFromFileSize(fileSize)
+	reserve := s.memCalc.calcMemFromFileSize(fileSize)
 	var memLimitRelease func()
 	memLimitRelease, err = s.memLimiter.TryAcquireN(ctx, reserve)
 	if err != nil {

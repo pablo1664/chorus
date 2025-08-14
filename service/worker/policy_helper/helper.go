@@ -19,14 +19,17 @@ package policy_helper
 import (
 	"context"
 	"errors"
+
+	"github.com/hibiken/asynq"
+	"golang.org/x/sync/errgroup"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/policy"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/tasks"
-	"github.com/hibiken/asynq"
-	"golang.org/x/sync/errgroup"
 )
 
 func CreateMainFollowerPolicies(
@@ -87,7 +90,8 @@ func createReplication(
 	if !errors.Is(err, dom.ErrNotFound) {
 		return err
 	}
-	err = policySvc.AddUserReplicationPolicy(ctx, user, from, to, tasks.PriorityDefault1)
+	policy := entity.NewUserReplicationPolicy(from, to)
+	err = policySvc.AddUserReplicationPolicy(ctx, user, policy, tasks.PriorityDefault1)
 	if err != nil {
 		if errors.Is(err, dom.ErrAlreadyExists) {
 			return nil
@@ -104,7 +108,14 @@ func createReplication(
 		return err
 	}
 	for _, bucket := range buckets {
-		err = policySvc.AddBucketReplicationPolicy(ctx, user, bucket.Name, from, to, tasks.PriorityDefault1, nil)
+		replicationID := entity.ReplicationStatusID{
+			User:        user,
+			FromStorage: from,
+			FromBucket:  bucket.Name,
+			ToStorage:   to,
+			ToBucket:    bucket.Name,
+		}
+		err = policySvc.AddBucketReplicationPolicy(ctx, replicationID, tasks.PriorityDefault1, nil)
 		if err != nil {
 			if errors.Is(err, dom.ErrAlreadyExists) {
 				continue
@@ -115,6 +126,7 @@ func createReplication(
 			Sync: tasks.Sync{
 				FromStorage: from,
 				ToStorage:   to,
+				ToBucket:    bucket.Name,
 			},
 			Bucket: bucket.Name,
 		})

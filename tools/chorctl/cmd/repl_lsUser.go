@@ -19,12 +19,14 @@ package cmd
 import (
 	"context"
 	"fmt"
-	pb "github.com/clyso/chorus/proto/gen/go/chorus"
-	"github.com/clyso/chorus/tools/chorctl/internal/api"
-	"github.com/sirupsen/logrus"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"os"
 	"text/tabwriter"
+
+	"github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/types/known/emptypb"
+
+	pb "github.com/clyso/chorus/proto/gen/go/chorus"
+	"github.com/clyso/chorus/tools/chorctl/internal/api"
 
 	"github.com/spf13/cobra"
 )
@@ -54,7 +56,7 @@ chorctl repl ls-user`,
 		w := tabwriter.NewWriter(os.Stdout, 10, 1, 5, ' ', 0)
 		fmt.Fprintln(w, "FROM\tTO\tUSER")
 		for _, m := range res.Replications {
-			fmt.Fprintln(w, fmt.Sprintf("%s\t%s\t%s", m.From, m.To, m.User))
+			fmt.Fprintf(w, "%s\t%s\t%s\n", m.From, m.To, m.User)
 		}
 		w.Flush()
 	},

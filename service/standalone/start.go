@@ -25,17 +25,19 @@ import (
 	"strings"
 
 	"github.com/alicebob/miniredis/v2"
+	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v3"
+
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/features"
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/service/proxy"
 	"github.com/clyso/chorus/service/worker"
-	"golang.org/x/sync/errgroup"
-	"gopkg.in/yaml.v3"
 )
 
 const (
+	//nolint:staticcheck //character used to set terminal color
 	connectInfo = `[92m_________ .__                               
 \_   ___ \|  |__   ___________ __ __  ______
 /    \  \/|  |  \ /  _ \_  __ \  |  \/  ___/
@@ -123,7 +125,9 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	}
 
 	workerConf := conf.Config
-	workerConf.Redis.Address = redisSvc.Addr()
+	if len(workerConf.Redis.Addresses) == 0 {
+		workerConf.Redis.Addresses = []string{redisSvc.Addr()}
+	}
 
 	// deep copy worker config
 	wcBytes, err := yaml.Marshal(&workerConf)
@@ -148,7 +152,9 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 			Storage: conf.Storage,
 			Cors:    conf.Proxy.Cors,
 		}
-		proxyConf.Redis.Address = redisSvc.Addr()
+		if len(proxyConf.Redis.Addresses) == 0 {
+			proxyConf.Redis.Addresses = []string{redisSvc.Addr()}
+		}
 
 		// deep copy proxy config
 		pcBytes, err := yaml.Marshal(&proxyConf)
@@ -177,10 +183,12 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 		return err
 	}
 
+	_, useFakeStorageCreds := fake[conf.Proxy.Auth.UseStorage]
+
 	fmt.Printf(connectInfo,
 		uiURL,
 		proxyURL,
-		printCreds(conf),
+		printCreds(conf, useFakeStorageCreds),
 		localhost(conf.Api.GrpcPort),
 		httpLocalhost(conf.Api.HttpPort),
 		redisSvc.Addr(),
@@ -198,7 +206,7 @@ func localhost(port int) string {
 	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
-func printCreds(conf *Config) string {
+func printCreds(conf *Config, printSecrets bool) string {
 	if !conf.Proxy.Enabled {
 		return ""
 	}
@@ -213,7 +221,11 @@ func printCreds(conf *Config) string {
 	}
 	res := make([]string, 0, len(creds))
 	for s, v4 := range creds {
-		res = append(res, fmt.Sprintf(" - %s: [%s|%s]", s, v4.AccessKeyID, v4.SecretAccessKey))
+		secret := "<hidden>"
+		if printSecrets {
+			secret = v4.SecretAccessKey
+		}
+		res = append(res, fmt.Sprintf(" - %s: [%s|%s]", s, v4.AccessKeyID, secret))
 	}
 	return strings.Join(res, "\n")
 }

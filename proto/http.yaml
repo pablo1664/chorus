@@ -3,15 +3,26 @@ config_version: 3
 
 http:
   rules:
+    - selector: chorus.Chorus.StartConsistencyCheck
+      post: /consistency/start
+      body: "*"
+    - selector: chorus.Chorus.ListConsistencyChecks
+      get: /consistency/list
+    - selector: chorus.Chorus.GetConsistencyCheckReport
+      get: /consistency/report
+    - selector: chorus.Chorus.GetConsistencyCheckReportEntries
+      get: /consistency/report-entries
+    - selector: chorus.Chorus.DeleteConsistencyCheckReport
+      put: /consistency/delete
+      body: "*"
+    - selector: chorus.Chorus.GetAppVersion
+      get: /version
     - selector: chorus.Chorus.GetStorages
       get: /storage
-
     - selector: chorus.Chorus.GetProxyCredentials
       get: /proxy
-
     - selector: chorus.Chorus.GetAgents
       get: /agents
-
     - selector: chorus.Chorus.ListBucketsForReplication
       post: /replication/list-buckets
       body: "*"
@@ -37,7 +48,23 @@ http:
     - selector: chorus.Chorus.CompareBucket
       post: /replication/compare-bucket
       body: "*"
-    - selector: chorus.Chorus.SwitchMainBucket
+    - selector: chorus.Chorus.SwitchBucketZeroDowntime
+      post: /replication/switch/zero-downtime
+      body: "*"
+    - selector: chorus.Chorus.SwitchBucket
       post: /replication/switch
       body: "*"
-
+    - selector: chorus.Chorus.DeleteBucketSwitch
+      post: /replication/switch/delete
+      body: "*"
+    - selector: chorus.Chorus.GetBucketSwitchStatus
+      post: /replication/switch/status
+      body: "*"
+    - selector: chorus.Chorus.ListReplicationSwitches
+      get: /replication/switch
+    - selector: chorus.Chorus.AddBucketReplication
+      post: /v2/replication/add
+      body: "*"
+    - selector: chorus.Chorus.GetReplication
+      post: /replication/get
+      body: "*"

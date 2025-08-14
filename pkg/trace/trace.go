@@ -18,14 +18,16 @@ package trace
 
 import (
 	"context"
-	"github.com/clyso/chorus/pkg/dom"
+
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.7.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/clyso/chorus/pkg/dom"
 )
 
 type Config struct {
@@ -45,9 +47,8 @@ func NewTracerProvider(conf *Config, version dom.AppInfo) (func(ctx context.Cont
 		)
 		//return func(ctx context.Context) error { return nil }, trace.NewNoopTracerProvider(), nil
 	} else {
-		exp, err := jaeger.New(
-			jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(conf.Endpoint)),
-		)
+		exp, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(conf.Endpoint))
+
 		if err != nil {
 			return nil, nil, err
 		}

@@ -4,8 +4,10 @@
 .fleet
 volumes
 .env
+!ui/.env
 *.private.env.json
 **/*.lock
+!ui/yarn.lock
 **/override.yaml
 chorusui.tar.gz
 ui-version.txt
@@ -13,3 +15,6 @@ standalone
 standalone/
 **/*.tar.gz
 **/*.zip
+build/
+.tools/
+.build

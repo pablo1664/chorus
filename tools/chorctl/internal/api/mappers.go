@@ -18,10 +18,14 @@ package api
 
 import (
 	"fmt"
-	pb "github.com/clyso/chorus/proto/gen/go/chorus"
-	"google.golang.org/protobuf/types/known/timestamppb"
+	"io"
+	"slices"
 	"strings"
 	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 )
 
 func StorageHeader() string {
@@ -41,7 +45,7 @@ func StorageRow(in *pb.Storage) string {
 }
 
 func ReplHeader() string {
-	return "NAME\tPROGRESS\tSIZE\tOBJECTS\tEVENTS\tPAUSED\tLAG\tAGE"
+	return "NAME\tPROGRESS\tSIZE\tOBJECTS\tEVENTS\tPAUSED\tAGE\tHAS_SWITCH"
 }
 
 func ReplRow(in *pb.Replication) string {
@@ -52,11 +56,10 @@ func ReplRow(in *pb.Replication) string {
 	bytes := fmt.Sprintf("%s/%s", ByteCountIEC(in.InitBytesDone), ByteCountIEC(in.InitBytesListed))
 	objects := fmt.Sprintf("%d/%d", in.InitObjDone, in.InitObjListed)
 	events := fmt.Sprintf("%d/%d", in.EventsDone, in.Events)
-	lag := "?"
-	if in.LastEmittedAt != nil && in.LastProcessedAt != nil {
-		lag = in.LastEmittedAt.AsTime().Sub(in.LastProcessedAt.AsTime()).String()
+	if in.ToBucket != "" {
+		in.To += ":" + in.ToBucket
 	}
-	return fmt.Sprintf("%s:%s:%s->%s\t%s\t%s\t%s\t%s\t%v\t%s\t%s", in.User, in.Bucket, in.From, in.To, ToPercentage(p), bytes, objects, events, in.IsPaused, lag, DateToAge(in.CreatedAt))
+	return fmt.Sprintf("%s:%s:%s->%s\t%s\t%s\t%s\t%s\t%v\t%s\t%v", in.User, in.Bucket, in.From, in.To, ToPercentage(p), bytes, objects, events, in.IsPaused, DateToAge(in.CreatedAt), in.HasSwitch)
 }
 
 func ToPercentage(in float64) string {
@@ -136,4 +139,60 @@ func DurationToStr(age time.Duration) string {
 		return fmt.Sprintf("%dd%dh", int(age.Hours()/24), int(age.Hours())%24)
 	}
 	return fmt.Sprintf("%dd", int(age.Hours()/24))
+}
+
+func ConsistencyCheckHeader() string {
+	return "READY\tQUEUED\tCOMPLETED\tSTORAGES"
+}
+
+func ConsistencyCheckRow(in *pb.ConsistencyCheck) string {
+	storageLocations := make([]string, 0, len(in.Locations))
+	for _, location := range in.Locations {
+		storageLocations = append(storageLocations, fmt.Sprintf("%s:%s", location.Storage, location.Bucket))
+	}
+	return fmt.Sprintf("%t\t%d\t%d\t%s", in.Ready, in.Queued, in.Completed, strings.Join(storageLocations, ", "))
+}
+
+func ConsistencyCheckReportBrief(in *pb.ConsistencyCheck) string {
+	briefTable := `READY:	%t
+QUEUED:	%d
+COMPLETED:	%d
+CONSISTENT:	%t`
+	return fmt.Sprintf(briefTable, in.Ready, in.Queued, in.Completed, in.Consistent)
+}
+
+func ConsistencyCheckReportHeader(storages []string) string {
+	return fmt.Sprintf("PATH\tETAG\t%s", strings.Join(storages, "\t"))
+}
+
+func ConsistencyCheckReportRow(storages []string, entry *pb.ConsistencyCheckReportEntry) string {
+	storageMarkers := ""
+	for _, storage := range storages {
+		if slices.Contains(entry.Storages, storage) {
+			storageMarkers += "\t✓"
+		} else {
+			storageMarkers += "\tX"
+		}
+	}
+	return fmt.Sprintf("%s\t%s%s", entry.Object, entry.Etag, storageMarkers)
+}
+
+func SwitchHeader() string {
+	return "USER\tBUCKET\tFROM\tTO\tSTATUS\tLAST_STARTED\tDONE"
+}
+
+func PrintSwitchRow(w io.Writer, in *pb.GetBucketSwitchStatusResponse, wide bool) {
+	fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		in.ReplicationId.User,
+		in.ReplicationId.Bucket,
+		in.ReplicationId.From,
+		in.ReplicationId.To,
+		in.LastStatus.String(),
+		DateToAge(in.LastStartedAt),
+		DateToAge(in.DoneAt))
+	if wide {
+		for _, hist := range in.History {
+			fmt.Fprintf(w, "\t\t%s\n", hist)
+		}
+	}
 }

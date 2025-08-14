@@ -19,21 +19,24 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/clyso/chorus/pkg/config"
-	"github.com/clyso/chorus/pkg/dom"
-	"github.com/clyso/chorus/service/agent"
-	"github.com/rs/xid"
-	"github.com/rs/zerolog"
-	stdlog "github.com/rs/zerolog/log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/rs/xid"
+	"github.com/rs/zerolog"
+	stdlog "github.com/rs/zerolog/log"
+
+	"github.com/clyso/chorus/pkg/config"
+	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/service/agent"
 )
 
 // this information will be collected when built, by -ldflags="-X 'main.version=$(tag)' -X 'main.commit=$(commit)'".
 var (
 	version            = "development"
 	commit             = "not set"
+	date               = "not set"
 	configPath         = flag.String("config", "config/config.yaml", "set path to config directory")
 	configOverridePath = flag.String("config-override", "config/override.yaml", "set path to config override directory")
 )
@@ -65,6 +68,7 @@ func main() {
 	err = agent.Start(ctx, dom.AppInfo{
 		Version: version,
 		Commit:  commit,
+		Date:    date,
 		App:     "agent",
 		AppID:   xid.New().String(),
 	}, conf)

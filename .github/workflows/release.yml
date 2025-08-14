@@ -2,7 +2,7 @@ name: Release Artifacts
 on:
   push:
     tags:
-      - '*'
+      - "*"
 env:
   REGISTRY: harbor.clyso.com
 jobs:
@@ -10,12 +10,24 @@ jobs:
   docker:
     strategy:
       matrix:
-        service:
-          - worker
-          - proxy
-          - agent
+        image:
+          - context: .
+            dockerfile: Dockerfile
+            name: worker
+          - context: .
+            dockerfile: Dockerfile
+            name: proxy
+          - context: .
+            dockerfile: Dockerfile
+            name: agent
+          - context: ./ui
+            dockerfile: ./ui/Dockerfile
+            name: web-ui
     runs-on: ubuntu-latest
     steps:
+      - name: Set build date
+        id: date
+        run: echo "::set-output name=date::$(date -Is -u)"
       - uses: actions/checkout@v4
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -30,15 +42,18 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/chorus/${{ matrix.service }}:${{ github.ref_name }}
-            ${{ env.REGISTRY }}/chorus/${{ matrix.service }}:latest
+            ${{ env.REGISTRY }}/chorus/${{ matrix.image.name }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/chorus/${{ matrix.image.name }}:latest
           build-args: |
+            BUILD_DATE=${{ steps.date.outputs.date }}
             GIT_TAG=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
-            SERVICE=${{ matrix.service }}
+            SERVICE=${{ matrix.image.name }}
   # publish helm chart
   helm:
     needs: docker
@@ -66,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v4
         with:
-          go-version: "1.21"
+          go-version: "1.24"
       - name: Install zip
         uses: montudor/action-zip@v1
       - name: Build standalone binaries
@@ -98,7 +113,7 @@ jobs:
               fi
               rm ./$bin_name
           done
-           
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5
         with:

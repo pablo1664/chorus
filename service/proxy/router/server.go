@@ -17,13 +17,15 @@
 package router
 
 import (
+	"io"
+	"net/http"
+
+	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/replication"
 	"github.com/clyso/chorus/pkg/util"
-	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	"io"
-	"net/http"
 )
 
 func Serve(router Router, replSvc replication.Service) *http.ServeMux {
@@ -46,11 +48,11 @@ func Serve(router Router, replSvc replication.Service) *http.ServeMux {
 			}
 		}()
 		ctx = log.WithStorage(ctx, storage)
+		// TODO: is it reachable? This branch is active only if err == nil
 		if isApiErr {
 			zerolog.Ctx(ctx).Info().Err(err).Msg("s3 api error returned")
-		}
-		// create replication tasks according to replication rules
-		if err == nil && !isApiErr {
+			// create replication tasks according to replication rules
+		} else {
 			replCtx, cancel := log.StartNew(ctx)
 			defer cancel()
 			for _, task := range taskList {

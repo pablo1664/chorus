@@ -18,18 +18,21 @@ package cmd
 
 import (
 	"context"
+
+	"github.com/sirupsen/logrus"
+
 	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 	"github.com/clyso/chorus/tools/chorctl/internal/api"
-	"github.com/sirupsen/logrus"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	rdFrom   string
-	rdTo     string
-	rdUser   string
-	rdBucket string
+	rdFrom     string
+	rdTo       string
+	rdUser     string
+	rdBucket   string
+	rdToBucket string
 )
 
 // deleteCmd represents the delete command
@@ -48,12 +51,17 @@ chorctl repl delete -f main -t follower -u admin -b bucket1`,
 		defer conn.Close()
 		client := pb.NewChorusClient(conn)
 
-		_, err = client.DeleteReplication(ctx, &pb.ReplicationRequest{
-			User:   rdUser,
-			Bucket: rdBucket,
-			From:   rdFrom,
-			To:     rdTo,
-		})
+		req := &pb.ReplicationRequest{
+			User:     rdUser,
+			Bucket:   rdBucket,
+			From:     rdFrom,
+			To:       rdTo,
+			ToBucket: rdToBucket,
+		}
+		if rdToBucket == "" {
+			req.ToBucket = rdBucket
+		}
+		_, err = client.DeleteReplication(ctx, req)
 		if err != nil {
 			logrus.WithError(err).Fatal("unable to add replication")
 		}
@@ -66,6 +74,7 @@ func init() {
 	deleteCmd.Flags().StringVarP(&rdTo, "to", "t", "", "to storage")
 	deleteCmd.Flags().StringVarP(&rdUser, "user", "u", "", "storage user")
 	deleteCmd.Flags().StringVarP(&rdBucket, "bucket", "b", "", "bucket name")
+	deleteCmd.Flags().StringVar(&rdToBucket, "to-bucket", "", "custom destinatin bucket name. Set if destination bucket should have different name from source bucket")
 	err := deleteCmd.MarkFlagRequired("from")
 	if err != nil {
 		logrus.WithError(err).Fatal()

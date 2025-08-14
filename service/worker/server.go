@@ -22,10 +22,16 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/extra/redisotel/v9"
+	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+
 	"github.com/clyso/chorus/pkg/api"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/features"
-	"github.com/clyso/chorus/pkg/lock"
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/meta"
 	"github.com/clyso/chorus/pkg/metrics"
@@ -36,18 +42,13 @@ import (
 	"github.com/clyso/chorus/pkg/rpc"
 	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/storage"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/pkg/trace"
 	"github.com/clyso/chorus/pkg/util"
 	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 	"github.com/clyso/chorus/service/worker/handler"
 	"github.com/clyso/chorus/service/worker/policy_helper"
-	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
-	"github.com/hibiken/asynq"
-	"github.com/redis/go-redis/extra/redisotel/v9"
-	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog"
-	"google.golang.org/grpc"
 )
 
 func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
@@ -65,7 +66,9 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	if err != nil {
 		return err
 	}
-	defer shutdown(context.Background())
+	defer func() {
+		_ = shutdown(context.Background())
+	}()
 
 	appRedis := util.NewRedis(conf.Redis, conf.Redis.MetaDB)
 	defer appRedis.Close()
@@ -133,12 +136,12 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	limiter := ratelimit.New(appRedis, conf.Storage.RateLimitConf())
 	lockRedis := util.NewRedis(conf.Redis, conf.Redis.LockDB)
 	defer lockRedis.Close()
-	if conf.Lock.Overlap > 0 {
-		lock.UpdateOverlap(conf.Lock.Overlap)
-	}
-	locker := lock.New(lockRedis)
+	replicationStatusLocker := store.NewReplicationStatusLocker(lockRedis, conf.Lock.Overlap)
+	userLocker := store.NewUserLocker(lockRedis, conf.Lock.Overlap)
+	objectLocker := store.NewObjectLocker(lockRedis, conf.Lock.Overlap)
+	bucketLocker := store.NewBucketLocker(lockRedis, conf.Lock.Overlap)
 
-	workerSvc := handler.New(conf.Worker, s3Clients, versionSvc, policySvc, storageSvc, rc, taskClient, limiter, locker)
+	workerSvc := handler.New(conf.Worker, s3Clients, versionSvc, policySvc, storageSvc, rc, taskClient, limiter, objectLocker, bucketLocker, replicationStatusLocker)
 
 	stdLogger := log.NewStdLogger()
 	redis.SetLogger(stdLogger)
@@ -178,6 +181,8 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 
 				tasks.QueueMigrateBucketListObjects: 100,
 
+				tasks.QueueConsistencyCheck: 12,
+
 				tasks.QueueMigrateObjCopyHighest5: 11,
 				tasks.QueueEventsHighest5:         10,
 				tasks.QueueMigrateObjCopy4:        9,
@@ -212,7 +217,12 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	mux.HandleFunc(tasks.TypeMigrateObjCopy, workerSvc.HandleMigrationObjCopy)
 	mux.HandleFunc(tasks.TypeApiCostEstimation, workerSvc.CostsEstimation)
 	mux.HandleFunc(tasks.TypeApiCostEstimationList, workerSvc.CostsEstimationList)
-	mux.HandleFunc(tasks.TypeApiReplicationSwitch, workerSvc.FinishReplicationSwitch)
+	mux.HandleFunc(tasks.TypeConsistencyCheck, workerSvc.HandleConsistencyCheck)
+	mux.HandleFunc(tasks.TypeConsistencyCheckList, workerSvc.HandleConsistencyCheckList)
+	mux.HandleFunc(tasks.TypeConsistencyCheckReadiness, workerSvc.HandleConsistencyCheckReadiness)
+	mux.HandleFunc(tasks.TypeConsistencyCheckResult, workerSvc.HandleConsistencyCheckDelete)
+	mux.HandleFunc(tasks.TypeApiZeroDowntimeSwitch, workerSvc.HandleZeroDowntimeReplicationSwitch)
+	mux.HandleFunc(tasks.TypeApiSwitchWithDowntime, workerSvc.HandleSwitchWithDowntime)
 
 	server := util.NewServer()
 	err = server.Add("queue_workers", func(ctx context.Context) error {
@@ -232,7 +242,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	}
 
 	if conf.Api.Enabled {
-		handlers := api.GrpcHandlers(conf.Storage, s3Clients, taskClient, rc, policySvc, locker, rpc.NewProxyClient(appRedis), rpc.NewAgentClient(appRedis), notifications.NewService(s3Clients))
+		handlers := api.GrpcHandlers(conf.Storage, s3Clients, taskClient, rc, policySvc, versionSvc, storageSvc, rpc.NewProxyClient(appRedis), rpc.NewAgentClient(appRedis), notifications.NewService(s3Clients), replicationStatusLocker, userLocker, &app)
 		start, stop, err := api.NewGrpcServer(conf.Api.GrpcPort, handlers, tp, conf.Log, app)
 		if err != nil {
 			return err

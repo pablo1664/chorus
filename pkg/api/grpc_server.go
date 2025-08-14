@@ -24,12 +24,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	xctx "github.com/clyso/chorus/pkg/ctx"
-	"github.com/clyso/chorus/pkg/dom"
-	"github.com/clyso/chorus/pkg/log"
-	"github.com/clyso/chorus/pkg/trace"
-	pb "github.com/clyso/chorus/proto/gen/go/chorus"
-	"github.com/golang/protobuf/proto"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
@@ -41,7 +35,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/runtime/protoiface"
 	"google.golang.org/protobuf/types/known/durationpb"
+
+	xctx "github.com/clyso/chorus/pkg/ctx"
+	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/log"
+	"github.com/clyso/chorus/pkg/trace"
+	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 )
 
 func NewGrpcServer(port int, handlers pb.ChorusServer, tracer otel_trace.TracerProvider, logConf *log.Config, version dom.AppInfo) (start func(context.Context) error, stop func(context.Context) error, err error) {
@@ -59,9 +60,9 @@ func NewGrpcServer(port int, handlers pb.ChorusServer, tracer otel_trace.TracerP
 			MinTime:             30 * time.Second,
 			PermitWithoutStream: true,
 		}),
+		grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(tracer))),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
 			prometheus.UnaryServerInterceptor,
-			otelgrpc.UnaryServerInterceptor(otelgrpc.WithTracerProvider(tracer)),
 			grpc_ctxtags.UnaryServerInterceptor(),
 			log.UnaryInterceptor(logConf, version.App, version.AppID),
 			trace.UnaryInterceptor(),
@@ -71,7 +72,6 @@ func NewGrpcServer(port int, handlers pb.ChorusServer, tracer otel_trace.TracerP
 		)),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
 			prometheus.StreamServerInterceptor,
-			otelgrpc.StreamServerInterceptor(otelgrpc.WithTracerProvider(tracer)),
 			grpc_ctxtags.StreamServerInterceptor(),
 			log.StreamInterceptor(logConf, version.App, version.AppID),
 			trace.StreamInterceptor(),
@@ -128,7 +128,7 @@ func unaryServerAccessLog(ctx context.Context, req interface{}, info *grpc.Unary
 	return resp, err
 }
 
-func rpcLogHandler(l zerolog.Logger, err error, fullMethod string) {
+func rpcLogHandler(l zerolog.Logger, err error, _ string) {
 	s := status.Convert(err)
 	code, msg := s.Code(), s.Message()
 	switch code {
@@ -169,7 +169,7 @@ func convertApiError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	details := []proto.Message{&errdetails.RequestInfo{RequestId: xctx.GetTraceID(ctx)}}
+	details := []protoiface.MessageV1{&errdetails.RequestInfo{RequestId: xctx.GetTraceID(ctx)}}
 	var code codes.Code
 	var mappedErr error
 	var retryErr *dom.ErrRateLimitExceeded
@@ -204,6 +204,9 @@ func convertApiError(ctx context.Context, err error) error {
 	case errors.Is(err, dom.ErrNotFound):
 		code = codes.NotFound
 		mappedErr = dom.ErrNotFound
+		details = append(details, &errdetails.ErrorInfo{
+			Reason: err.Error(),
+		})
 	case errors.As(err, &retryErr):
 		code = codes.ResourceExhausted
 		mappedErr = &dom.ErrRateLimitExceeded{}

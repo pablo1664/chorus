@@ -2,15 +2,17 @@ package migration
 
 import (
 	"bytes"
-	pb "github.com/clyso/chorus/proto/gen/go/chorus"
-	mclient "github.com/minio/minio-go/v7"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"testing"
 	"time"
+
+	mclient "github.com/minio/minio-go/v7"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/emptypb"
+
+	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 )
 
 func TestApi_Migrate_test(t *testing.T) {
@@ -35,6 +37,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err := apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b1,
+		ToBucket:  b1,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: true,
@@ -49,6 +52,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err = apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b2,
+		ToBucket:  b2,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: true,
@@ -92,6 +96,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err = apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b1,
+		ToBucket:  b1,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: true,
@@ -107,6 +112,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err = apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b2,
+		ToBucket:  b2,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: true,
@@ -140,29 +146,36 @@ func TestApi_Migrate_test(t *testing.T) {
 	r.Empty(repl.Replications)
 
 	_, err = apiClient.AddReplication(tstCtx, &pb.AddReplicationRequest{
-		User:            user,
-		From:            "f1",
-		To:              "main",
-		Buckets:         nil,
-		IsForAllBuckets: true,
+		User:    user,
+		From:    "f1",
+		To:      "main",
+		Buckets: []string{b1, b2},
 	})
 	r.Error(err)
 
 	_, err = apiClient.AddReplication(tstCtx, &pb.AddReplicationRequest{
-		User:            user,
-		From:            "main",
-		To:              "f1",
-		Buckets:         nil,
-		IsForAllBuckets: true,
+		User:    user,
+		From:    "main",
+		To:      "f1",
+		Buckets: []string{b1, b2},
 	})
 	r.NoError(err)
-
-	ur, err = apiClient.ListUserReplications(tstCtx, &emptypb.Empty{})
-	r.NoError(err)
-	r.Len(ur.Replications, 1)
-	r.EqualValues(user, ur.Replications[0].User)
-	r.EqualValues("main", ur.Replications[0].From)
-	r.EqualValues("f1", ur.Replications[0].To)
+	t.Cleanup(func() {
+		apiClient.DeleteReplication(tstCtx, &pb.ReplicationRequest{
+			User:     user,
+			Bucket:   b1,
+			ToBucket: b1,
+			From:     "main",
+			To:       "f1",
+		})
+		apiClient.DeleteReplication(tstCtx, &pb.ReplicationRequest{
+			User:     user,
+			Bucket:   b2,
+			ToBucket: b2,
+			From:     "main",
+			To:       "f1",
+		})
+	})
 
 	bfr, err = apiClient.ListBucketsForReplication(tstCtx, &pb.ListBucketsForReplicationRequest{
 		User:           user,
@@ -288,6 +301,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err = apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b1,
+		ToBucket:  b1,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: true,
@@ -303,6 +317,7 @@ func TestApi_Migrate_test(t *testing.T) {
 
 	diff, err = apiClient.CompareBucket(tstCtx, &pb.CompareBucketRequest{
 		Bucket:    b2,
+		ToBucket:  b2,
 		From:      "main",
 		To:        "f1",
 		ShowMatch: false,
@@ -348,6 +363,11 @@ func TestApi_Migrate_test(t *testing.T) {
 		r.EqualValues(repl.Replications[i].Events, repl.Replications[i].EventsDone)
 		r.NotNil(repl.Replications[i].LastProcessedAt)
 		r.NotNil(repl.Replications[i].LastEmittedAt)
+		r.False(repl.Replications[i].InitDoneAt.AsTime().IsZero())
+		r.True(
+			repl.Replications[i].InitDoneAt.AsTime().After(repl.Replications[i].CreatedAt.AsTime()) ||
+				repl.Replications[i].InitDoneAt.AsTime().Equal(repl.Replications[i].CreatedAt.AsTime()),
+		)
 		//		r.True(repl.Replications[i].LastProcessedAt.AsTime().Equal(repl.Replications[i].LastEmittedAt.AsTime()))
 		r.False(repl.Replications[i].LastEmittedAt.AsTime().IsZero())
 		r.False(repl.Replications[i].LastProcessedAt.AsTime().IsZero())
@@ -374,13 +394,15 @@ func TestApi_Migrate_test(t *testing.T) {
 		IsForAllBuckets: false,
 	})
 	r.NoError(err)
-
-	ur, err = apiClient.ListUserReplications(tstCtx, &emptypb.Empty{})
-	r.NoError(err)
-	r.Len(ur.Replications, 1)
-	r.EqualValues(user, ur.Replications[0].User)
-	r.EqualValues("main", ur.Replications[0].From)
-	r.EqualValues("f1", ur.Replications[0].To)
+	t.Cleanup(func() {
+		apiClient.DeleteReplication(tstCtx, &pb.ReplicationRequest{
+			User:     user,
+			Bucket:   b1,
+			ToBucket: b1,
+			From:     "main",
+			To:       "f2",
+		})
+	})
 
 	bfr, err = apiClient.ListBucketsForReplication(tstCtx, &pb.ListBucketsForReplicationRequest{
 		User:           user,
@@ -406,6 +428,15 @@ func TestApi_Migrate_test(t *testing.T) {
 		IsForAllBuckets: false,
 	})
 	r.NoError(err)
+	t.Cleanup(func() {
+		apiClient.DeleteReplication(tstCtx, &pb.ReplicationRequest{
+			User:     user,
+			Bucket:   b2,
+			ToBucket: b2,
+			From:     "main",
+			To:       "f2",
+		})
+	})
 
 	bfr, err = apiClient.ListBucketsForReplication(tstCtx, &pb.ListBucketsForReplicationRequest{
 		User:           user,
@@ -471,6 +502,7 @@ func TestApi_Migrate_test(t *testing.T) {
 	r.NoError(err)
 	r.Len(repl.Replications, 4)
 	cnt := 0
+
 	for i := 0; i < len(repl.Replications); i++ {
 		r.EqualValues("main", repl.Replications[i].From)
 		if repl.Replications[i].To != "f2" {
@@ -486,6 +518,13 @@ func TestApi_Migrate_test(t *testing.T) {
 		r.EqualValues(repl.Replications[i].Events, repl.Replications[i].EventsDone)
 		r.NotNil(repl.Replications[i].LastProcessedAt)
 		r.NotNil(repl.Replications[i].LastEmittedAt)
+
+		r.False(repl.Replications[i].InitDoneAt.AsTime().IsZero())
+		r.True(
+			repl.Replications[i].InitDoneAt.AsTime().After(repl.Replications[i].CreatedAt.AsTime()) ||
+				repl.Replications[i].InitDoneAt.AsTime().Equal(repl.Replications[i].CreatedAt.AsTime()),
+		)
+
 		//		r.True(repl.Replications[i].LastProcessedAt.AsTime().Equal(repl.Replications[i].LastEmittedAt.AsTime()))
 		r.False(repl.Replications[i].LastEmittedAt.AsTime().IsZero())
 		r.False(repl.Replications[i].LastProcessedAt.AsTime().IsZero())
@@ -556,6 +595,10 @@ func TestApi_Migrate_test(t *testing.T) {
 		r.EqualValues(repl.Replications[i].Events, repl.Replications[i].EventsDone)
 		r.NotNil(repl.Replications[i].LastProcessedAt)
 		r.NotNil(repl.Replications[i].LastEmittedAt)
+
+		r.False(repl.Replications[i].InitDoneAt.AsTime().IsZero())
+		r.True(repl.Replications[i].InitDoneAt.AsTime().After(repl.Replications[i].CreatedAt.AsTime()) || repl.Replications[i].InitDoneAt.AsTime().Equal(repl.Replications[i].CreatedAt.AsTime()))
+
 		//		r.True(repl.Replications[i].LastProcessedAt.AsTime().Equal(repl.Replications[i].LastEmittedAt.AsTime()))
 		r.False(repl.Replications[i].LastEmittedAt.AsTime().IsZero())
 		r.False(repl.Replications[i].LastProcessedAt.AsTime().IsZero())
@@ -570,7 +613,6 @@ func TestApi_Migrate_test(t *testing.T) {
 			}
 		}
 	}
-
 }
 
 func TestApi_Migrate_Http_api_test(t *testing.T) {

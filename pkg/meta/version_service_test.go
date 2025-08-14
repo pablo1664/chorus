@@ -18,11 +18,13 @@ package meta
 
 import (
 	"context"
+	"testing"
+
 	"github.com/alicebob/miniredis/v2"
-	"github.com/clyso/chorus/pkg/dom"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
-	"testing"
+
+	"github.com/clyso/chorus/pkg/dom"
 )
 
 func Test_Version_svc(t *testing.T) {
@@ -53,7 +55,7 @@ func Test_Version_svc(t *testing.T) {
 	r.NoError(err)
 	r.Empty(vers)
 
-	stor := "stor1"
+	stor := Destination("stor1")
 	err = s.UpdateIfGreater(ctx, obj, stor, -1)
 	r.ErrorIs(err, dom.ErrInvalidArg)
 	err = s.UpdateIfGreater(ctx, obj, stor, 0)
@@ -92,7 +94,7 @@ func Test_Version_svc(t *testing.T) {
 	r.NoError(err)
 	r.EqualValues(421, vers[stor])
 
-	stor2 := "stor2"
+	stor2 := Destination("stor2")
 	incVer2, err := s.IncrementObj(ctx, obj, stor2)
 	r.NoError(err)
 	r.EqualValues(422, incVer2)
@@ -232,9 +234,9 @@ func Test_Version_svc(t *testing.T) {
 
 func Test_inc_version_during_switch(t *testing.T) {
 	var (
-		stor1   = "stor1"
-		stor2   = "stor2"
-		stor3   = "stor3"
+		stor1   = Destination("stor1")
+		stor2   = Destination("stor2")
+		stor3   = Destination("stor3")
 		buck    = "buck"
 		objName = "object"
 		obj     = dom.Object{
@@ -316,4 +318,264 @@ func Test_inc_version_during_switch(t *testing.T) {
 	r.EqualValues(7, vers[stor1])
 	r.EqualValues(8, vers[stor2])
 	r.EqualValues(9, vers[stor3])
+}
+
+func Test_DeleteBucketMeta(t *testing.T) {
+	// setup
+	r := require.New(t)
+	red := miniredis.RunT(t)
+
+	c := redis.NewClient(&redis.Options{
+		Addr: red.Addr(),
+	})
+
+	s := NewVersionService(c)
+
+	s1, s2 := Destination("stor1"), Destination("stor2")
+	b1, b2 := "buck1", "buck2"
+	o1, o2, o3, o4 := dom.Object{
+		Bucket: b1,
+		Name:   "obj1",
+	}, dom.Object{
+		Bucket: b1,
+		Name:   "obj2",
+	}, dom.Object{
+		Bucket: b2,
+		Name:   "obj1",
+	}, dom.Object{
+		Bucket: b2,
+		Name:   "obj2",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// add version metadata for all storage/bucket/obj combinations
+	s.IncrementBucket(ctx, b1, s1)
+	s.IncrementBucket(ctx, b1, s2)
+	s.IncrementBucket(ctx, b2, s1)
+	s.IncrementBucket(ctx, b2, s2)
+
+	s.IncrementBucketACL(ctx, b1, s1)
+	s.IncrementBucketACL(ctx, b1, s2)
+	s.IncrementBucketACL(ctx, b2, s1)
+	s.IncrementBucketACL(ctx, b2, s2)
+
+	s.IncrementBucketTags(ctx, b1, s1)
+	s.IncrementBucketTags(ctx, b1, s2)
+	s.IncrementBucketTags(ctx, b2, s1)
+	s.IncrementBucketTags(ctx, b2, s2)
+
+	s.IncrementObj(ctx, o1, s1)
+	s.IncrementObj(ctx, o1, s2)
+	s.IncrementObj(ctx, o2, s1)
+	s.IncrementObj(ctx, o2, s2)
+	s.IncrementObj(ctx, o3, s1)
+	s.IncrementObj(ctx, o3, s2)
+	s.IncrementObj(ctx, o4, s1)
+	s.IncrementObj(ctx, o4, s2)
+
+	s.IncrementACL(ctx, o1, s1)
+	s.IncrementACL(ctx, o1, s2)
+	s.IncrementACL(ctx, o2, s1)
+	s.IncrementACL(ctx, o2, s2)
+	s.IncrementACL(ctx, o3, s1)
+	s.IncrementACL(ctx, o3, s2)
+	s.IncrementACL(ctx, o4, s1)
+	s.IncrementACL(ctx, o4, s2)
+
+	s.IncrementTags(ctx, o1, s1)
+	s.IncrementTags(ctx, o1, s2)
+	s.IncrementTags(ctx, o2, s1)
+	s.IncrementTags(ctx, o2, s2)
+	s.IncrementTags(ctx, o3, s1)
+	s.IncrementTags(ctx, o3, s2)
+	s.IncrementTags(ctx, o4, s1)
+	s.IncrementTags(ctx, o4, s2)
+
+	// delete bucket meta only for storage s1 and bucket b1
+	s.DeleteBucketMeta(ctx, s1, b1)
+
+	// check that that version metadata only for s1&b1 combiantion was removed (version is zero)
+	// and the rest of metadata remained the same
+	ver, err := s.GetObj(ctx, o1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetObj(ctx, o2)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetObj(ctx, o3)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetObj(ctx, o4)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetACL(ctx, o1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetACL(ctx, o2)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetACL(ctx, o3)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetACL(ctx, o4)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetTags(ctx, o1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetTags(ctx, o2)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetTags(ctx, o3)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetTags(ctx, o4)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucket(ctx, b1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucket(ctx, b2)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucketACL(ctx, b1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucketACL(ctx, b2)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucketTags(ctx, b1)
+	r.NoError(err)
+	r.Zero(ver[s1])
+	r.EqualValues(2, ver[s2])
+
+	ver, err = s.GetBucketTags(ctx, b2)
+	r.NoError(err)
+	r.EqualValues(1, ver[s1])
+	r.EqualValues(2, ver[s2])
+}
+
+func TestDestination_Parse(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	tests := []struct {
+		name        string
+		d           Destination
+		wantStorage string
+		wantBucket  *string
+	}{
+		{
+			name:        "only storage set",
+			d:           "abc",
+			wantStorage: "abc",
+			wantBucket:  nil,
+		},
+		{
+			name:        "nothing is set",
+			d:           "",
+			wantStorage: "",
+			wantBucket:  nil,
+		},
+		{
+			name:        "storage and bucket",
+			d:           "s:b",
+			wantStorage: "s",
+			wantBucket:  strPtr("b"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStorage, gotBucket := tt.d.Parse()
+			if gotStorage != tt.wantStorage {
+				t.Errorf("Destination.Parse() gotStorage = %v, want %v", gotStorage, tt.wantStorage)
+			}
+			if gotBucket != tt.wantBucket {
+				if gotBucket == nil {
+					t.Errorf("Destination.Parse() gotBucket = %v, want %v", gotBucket, tt.wantBucket)
+				} else if tt.wantBucket == nil {
+					t.Errorf("Destination.Parse() gotBucket = %v, want %v", gotBucket, tt.wantBucket)
+
+				} else if *tt.wantBucket != *gotBucket {
+					t.Errorf("Destination.Parse() gotBucket = %s, want %s", *gotBucket, *tt.wantBucket)
+				}
+			}
+		})
+	}
+}
+
+func TestToDest(t *testing.T) {
+	type args struct {
+		storage string
+		bucket  string
+	}
+	tests := []struct {
+		name string
+		args args
+		want Destination
+	}{
+		{
+			name: "empty",
+			args: args{
+				storage: "",
+				bucket:  "",
+			},
+			want: "",
+		},
+		{
+			name: "only storage",
+			args: args{
+				storage: "stor",
+				bucket:  "",
+			},
+			want: "stor",
+		},
+		{
+			name: "storage and bucket",
+			args: args{
+				storage: "stor",
+				bucket:  "buck",
+			},
+			want: "stor:buck",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ToDest(tt.args.storage, tt.args.bucket); got != tt.want {
+				t.Errorf("ToDest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

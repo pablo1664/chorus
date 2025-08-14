@@ -19,10 +19,12 @@ package migration
 import (
 	"encoding/base64"
 	"fmt"
-	"github.com/clyso/chorus/pkg/s3"
-	mclient "github.com/minio/minio-go/v7"
 	"math/rand"
 	"strings"
+
+	mclient "github.com/minio/minio-go/v7"
+
+	"github.com/clyso/chorus/pkg/s3"
 )
 
 type testObj struct {
@@ -46,12 +48,12 @@ func getTestObj(name, bucket string) testObj {
 
 func listObjects(c *mclient.Client, bucket string, prefix string) ([]string, error) {
 	var res []string
-	objCh := c.ListObjects(tstCtx, bucket, mclient.ListObjectsOptions{Prefix: prefix})
+	objCh := c.ListObjects(tstCtx, bucket, mclient.ListObjectsOptions{Prefix: prefix, Recursive: true})
 	for obj := range objCh {
 		if obj.Err != nil {
 			return nil, obj.Err
 		}
-		if obj.Size == 0 {
+		if obj.Size == 0 && obj.Key != prefix {
 			subRes, err := listObjects(c, bucket, obj.Key)
 			if err != nil {
 				return nil, err
@@ -134,7 +136,6 @@ func generateCredentials() s3.CredentialsV4 {
 }
 
 func cleanup(buckets ...string) {
-
 	for _, bucket := range buckets {
 		objCh, _ := listObjects(mainClient, bucket, "")
 		for _, obj := range objCh {
@@ -154,5 +155,12 @@ func cleanup(buckets ...string) {
 		}
 		_ = f2Client.RemoveBucket(tstCtx, bucket)
 	}
+}
 
+func rmBucket(client *mclient.Client, bucket string) error {
+	objs, _ := listObjects(client, bucket, "")
+	for _, obj := range objs {
+		_ = client.RemoveObject(tstCtx, bucket, obj, mclient.RemoveObjectOptions{ForceDelete: true})
+	}
+	return client.RemoveBucket(tstCtx, bucket)
 }

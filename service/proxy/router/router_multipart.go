@@ -19,13 +19,16 @@ package router
 import (
 	"errors"
 	"fmt"
-	xctx "github.com/clyso/chorus/pkg/ctx"
-	"github.com/clyso/chorus/pkg/dom"
-	"github.com/clyso/chorus/pkg/s3client"
-	"github.com/clyso/chorus/pkg/tasks"
+	"net/http"
+
 	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
-	"net/http"
+
+	xctx "github.com/clyso/chorus/pkg/ctx"
+	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/s3client"
+	"github.com/clyso/chorus/pkg/tasks"
 )
 
 func (r *router) createMultipartUpload(req *http.Request) (resp *http.Response, storage string, isApiErr bool, err error) {
@@ -37,16 +40,15 @@ func (r *router) createMultipartUpload(req *http.Request) (resp *http.Response, 
 		return
 	}
 
-	replSwitch, switchErr := r.policySvc.GetReplicationSwitch(ctx, user, bucket)
+	replicationSwitchInfoID := entity.NewReplicationSwitchInfoID(user, bucket)
+	replSwitch, switchErr := r.policySvc.GetInProgressZeroDowntimeSwitchInfo(ctx, replicationSwitchInfoID)
 	if switchErr != nil {
 		if errors.Is(switchErr, dom.ErrNotFound) {
+			// no switch in progress
 			return
 		}
 		//return error
 		err = switchErr
-		return
-	}
-	if replSwitch.IsDone {
 		return
 	}
 	// switch in progress
@@ -174,61 +176,61 @@ func (r *router) uploadPart(req *http.Request) (resp *http.Response, storage str
 func (r *router) routeMultipart(req *http.Request) (storage string, switchInProgress bool, err error) {
 	ctx := req.Context()
 	user, bucket, object := xctx.GetUser(ctx), xctx.GetBucket(ctx), xctx.GetObject(ctx)
-	storage, err = r.policySvc.GetRoutingPolicy(ctx, user, bucket)
+	bucketRoutingPolicyID := entity.NewBucketRoutingPolicyID(user, bucket)
+	storage, err = r.policySvc.GetRoutingPolicy(ctx, bucketRoutingPolicyID)
 	if err != nil {
 		if errors.Is(err, dom.ErrNotFound) {
-			return "", false, fmt.Errorf("%w: routing policy not configured: %v", dom.ErrPolicy, err)
+			return "", false, fmt.Errorf("%w: routing policy not configured: %w", dom.ErrPolicy, err)
 		}
 		return "", false, err
 	}
 
-	replSwitch, getSwitchErr := r.policySvc.GetReplicationSwitch(ctx, user, bucket)
-	if getSwitchErr != nil {
-		if errors.Is(getSwitchErr, dom.ErrNotFound) {
-			return
+	replicationSwitchInfoID := entity.NewReplicationSwitchInfoID(user, bucket)
+	replSwitch, err := r.policySvc.GetInProgressZeroDowntimeSwitchInfo(ctx, replicationSwitchInfoID)
+	if err != nil {
+		if errors.Is(err, dom.ErrNotFound) {
+			// no switch in progress
+			return storage, false, nil
 		}
-		//return error
-		err = getSwitchErr
-		return
-	}
-	switchInProgress = replSwitch.IsDone
-	if replSwitch.IsDone {
-		return
+		return storage, false, err
 	}
 	uploadID := req.URL.Query().Get("uploadId")
 	var exists bool
 	exists, err = r.storageSvc.ExistsUploadID(ctx, user, bucket, object, uploadID)
 	if err != nil {
-		return
+		return storage, true, err
 	}
 	if exists {
-		return storage, switchInProgress, nil
+		// multipart upload id exists in redis.
+		// route to new storage
+		return storage, true, nil
 	}
-	return replSwitch.OldMain, switchInProgress, nil
+	// multipart upload was started before switch.
+	// route to old storage
+	oldReplicationID := replSwitch.ReplicationID()
+	return oldReplicationID.FromStorage, true, nil
 }
 
 func (r *router) routeListMultipart(req *http.Request) (storage string, err error) {
 	ctx := req.Context()
 	user, bucket := xctx.GetUser(ctx), xctx.GetBucket(ctx)
-	storage, err = r.policySvc.GetRoutingPolicy(ctx, user, bucket)
+	bucketRoutingPolicyID := entity.NewBucketRoutingPolicyID(user, bucket)
+	storage, err = r.policySvc.GetRoutingPolicy(ctx, bucketRoutingPolicyID)
 	if err != nil {
 		if errors.Is(err, dom.ErrNotFound) {
-			return "", fmt.Errorf("%w: routing policy not configured: %v", dom.ErrPolicy, err)
+			return "", fmt.Errorf("%w: routing policy not configured: %w", dom.ErrPolicy, err)
 		}
 		return "", err
 	}
 
-	replSwitch, getSwitchErr := r.policySvc.GetReplicationSwitch(ctx, user, bucket)
-	if getSwitchErr != nil {
-		if errors.Is(getSwitchErr, dom.ErrNotFound) {
-			return
+	replicationSwitchInfoID := entity.NewReplicationSwitchInfoID(user, bucket)
+	replSwitch, err := r.policySvc.GetInProgressZeroDowntimeSwitchInfo(ctx, replicationSwitchInfoID)
+	if err != nil {
+		if errors.Is(err, dom.ErrNotFound) {
+			// no switch in progress
+			return storage, nil
 		}
-		//return error
-		err = getSwitchErr
-		return
-	}
-	if replSwitch.IsDone {
-		return
+		return "", err
 	}
 	// todo: maybe better always return old?
 	exists, err := r.storageSvc.ExistsUploads(ctx, user, bucket)
@@ -236,7 +238,12 @@ func (r *router) routeListMultipart(req *http.Request) (storage string, err erro
 		return "", err
 	}
 	if exists {
+		// multipart upload id exists in redis.
+		// route to new storage
 		return storage, nil
 	}
-	return replSwitch.OldMain, nil
+	// multipart upload was started before switch.
+	// route to old storage
+	oldReplicationID := replSwitch.ReplicationID()
+	return oldReplicationID.FromStorage, nil
 }

@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/clyso/chorus/pkg/dom"
-	"github.com/clyso/chorus/pkg/lock"
-	"github.com/clyso/chorus/pkg/log"
-	pb "github.com/clyso/chorus/proto/gen/go/chorus"
+	"math/rand"
+	"testing"
+	"time"
+
 	mclient "github.com/minio/minio-go/v7"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"math/rand"
-	"testing"
-	"time"
+
+	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/log"
+	"github.com/clyso/chorus/pkg/store"
+	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 )
 
 func TestApi_Migrate_Load_test(t *testing.T) {
@@ -87,22 +89,18 @@ func TestApi_Migrate_Lock_test(t *testing.T) {
 	t.Skip()
 	r := require.New(t)
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
-	obj := dom.Object{
-		Bucket:  "test",
-		Name:    "obj",
-		Version: "",
-	}
-	locker := lock.New(client)
+	objectLocker := store.NewObjectLocker(client, 0)
 	logger := log.GetLogger(&log.Config{Level: "info"}, "lock", "")
 	ctx := logger.WithContext(context.TODO())
 
-	release, refresh, err := locker.Lock(ctx, lock.ObjKey("stor", obj), lock.WithDuration(time.Millisecond*500))
+	objectLockID := entity.NewObjectLockID("stor", "test", "obj", "")
+	lock, err := objectLocker.Lock(ctx, objectLockID, store.WithDuration(time.Millisecond*500))
 	r.NoError(err)
 	time.Sleep(time.Millisecond * 400)
-	err = lock.WithRefresh(ctx, func() error {
+	err = lock.Do(ctx, time.Second, func() error {
 		time.Sleep(time.Second * 30)
 		return nil
-	}, refresh, time.Second)
+	})
 	r.NoError(err)
-	release()
+	lock.Release(ctx)
 }

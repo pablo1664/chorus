@@ -20,20 +20,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+
+	"github.com/rs/zerolog"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/meta"
 	"github.com/clyso/chorus/pkg/s3"
-	"github.com/rs/zerolog"
-	"net/http"
 )
 
 func (r *router) commonRead(req *http.Request) (resp *http.Response, storage string, isApiErr bool, err error) {
 	ctx := req.Context()
 	user, bucket := xctx.GetUser(ctx), xctx.GetBucket(ctx)
-	storage, err = r.policySvc.GetRoutingPolicy(ctx, user, bucket)
+	bucketRoutingPolicyID := entity.NewBucketRoutingPolicyID(user, bucket)
+	storage, err = r.policySvc.GetRoutingPolicy(ctx, bucketRoutingPolicyID)
 	if err != nil {
 		if errors.Is(err, dom.ErrNotFound) {
-			return nil, "", false, fmt.Errorf("%w: routing policy not configured: %v", dom.ErrPolicy, err)
+			return nil, "", false, fmt.Errorf("%w: routing policy not configured: %w", dom.ErrPolicy, err)
 		}
 		return nil, "", false, err
 	}
@@ -59,10 +64,11 @@ func (r *router) commonRead(req *http.Request) (resp *http.Response, storage str
 func (r *router) commonWrite(req *http.Request) (resp *http.Response, storage string, isApiErr bool, err error) {
 	ctx := req.Context()
 	user, bucket := xctx.GetUser(ctx), xctx.GetBucket(ctx)
-	storage, err = r.policySvc.GetRoutingPolicy(ctx, user, bucket)
+	bucketRoutingPolicyID := entity.NewBucketRoutingPolicyID(user, bucket)
+	storage, err = r.policySvc.GetRoutingPolicy(ctx, bucketRoutingPolicyID)
 	if err != nil {
 		if errors.Is(err, dom.ErrNotFound) {
-			return nil, "", false, fmt.Errorf("%w: routing policy not configured: %v", dom.ErrPolicy, err)
+			return nil, "", false, fmt.Errorf("%w: routing policy not configured: %w", dom.ErrPolicy, err)
 		}
 		return nil, "", false, err
 	}
@@ -79,32 +85,35 @@ func (r *router) commonWrite(req *http.Request) (resp *http.Response, storage st
 
 // adjustObjReadRoute adjust routing policy for read requests during switch process if old storage still has most recent obj version
 func (r *router) adjustObjReadRoute(ctx context.Context, prevStorage, user, bucket string) (string, error) {
-	switchInProgress, err := r.policySvc.IsReplicationSwitchInProgress(ctx, user, bucket)
+	switchID := entity.NewReplicationSwitchInfoID(user, bucket)
+	_, err := r.policySvc.GetInProgressZeroDowntimeSwitchInfo(ctx, switchID)
 	if err != nil {
+		if errors.Is(err, dom.ErrNotFound) {
+			// no zero-downtime switch in progress
+			return prevStorage, nil
+		}
 		return "", err
 	}
-	if !switchInProgress {
-		return prevStorage, nil
-	}
+	// since switch is in progress, we need to check if the object version is higher in other storage
 	objMeta, err := r.getVersion(ctx)
 	if err != nil {
 		return "", err
 	}
-	prevStorageVer := objMeta[prevStorage]
-	maxVerStorage, maxVer := prevStorage, prevStorageVer
+	prevStorageVer := objMeta[meta.Destination(prevStorage)]
+	maxVerStorage, maxVer := meta.Destination(prevStorage), prevStorageVer
 	for storage, version := range objMeta {
 		if version > maxVer {
 			maxVerStorage = storage
 			maxVer = version
 		}
 	}
-	if maxVerStorage != prevStorage {
+	if string(maxVerStorage) != prevStorage {
 		zerolog.Ctx(ctx).Info().Msgf("change read route during switch process: storage %s obj ver %d is higher than main storage %s %d", maxVerStorage, maxVer, prevStorage, prevStorageVer)
 	}
-	return maxVerStorage, nil
+	return string(maxVerStorage), nil
 }
 
-func (r *router) getVersion(ctx context.Context) (map[string]int64, error) {
+func (r *router) getVersion(ctx context.Context) (map[meta.Destination]int64, error) {
 	method := xctx.GetMethod(ctx)
 	switch {
 	case method == s3.GetObjectAcl || method == s3.PutObjectAcl:
@@ -122,7 +131,7 @@ func (r *router) getVersion(ctx context.Context) (map[string]int64, error) {
 
 	}
 	zerolog.Ctx(ctx).Warn().Msg("trying to obtain version metadata for unsupported method")
-	return map[string]int64{}, nil
+	return map[meta.Destination]int64{}, nil
 }
 
 func hasACLChanged(r *http.Request) bool {

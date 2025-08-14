@@ -18,18 +18,21 @@ package cmd
 
 import (
 	"context"
+
+	"github.com/sirupsen/logrus"
+
 	pb "github.com/clyso/chorus/proto/gen/go/chorus"
 	"github.com/clyso/chorus/tools/chorctl/internal/api"
-	"github.com/sirupsen/logrus"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	rpFrom   string
-	rpTo     string
-	rpUser   string
-	rpBucket string
+	rpFrom     string
+	rpTo       string
+	rpUser     string
+	rpBucket   string
+	rpToBucket string
 )
 
 // pauseCmd represents the pause command
@@ -48,12 +51,17 @@ chorctl repl pause -f main -t follower -u admin -b bucket1`,
 		defer conn.Close()
 		client := pb.NewChorusClient(conn)
 
-		_, err = client.PauseReplication(ctx, &pb.ReplicationRequest{
-			User:   rpUser,
-			Bucket: rpBucket,
-			From:   rpFrom,
-			To:     rpTo,
-		})
+		req := &pb.ReplicationRequest{
+			User:     rpUser,
+			Bucket:   rpBucket,
+			From:     rpFrom,
+			To:       rpTo,
+			ToBucket: rpToBucket,
+		}
+		if rpToBucket == "" {
+			req.ToBucket = rpBucket
+		}
+		_, err = client.PauseReplication(ctx, req)
 		if err != nil {
 			logrus.WithError(err).Fatal("unable to add replication")
 		}
@@ -66,6 +74,7 @@ func init() {
 	pauseCmd.Flags().StringVarP(&rpTo, "to", "t", "", "to storage")
 	pauseCmd.Flags().StringVarP(&rpUser, "user", "u", "", "storage user")
 	pauseCmd.Flags().StringVarP(&rpBucket, "bucket", "b", "", "bucket name")
+	pauseCmd.Flags().StringVar(&rpToBucket, "to-bucket", "", "custom destinatin bucket name. Set if destination bucket should have different name from source bucket")
 	err := pauseCmd.MarkFlagRequired("from")
 	if err != nil {
 		logrus.WithError(err).Fatal()
