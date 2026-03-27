@@ -19,7 +19,6 @@ package router
 import (
 	"net/http"
 
-	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
 
 	xctx "github.com/clyso/chorus/pkg/ctx"
@@ -50,18 +49,9 @@ func (r *s3Router) putObject(req *http.Request) (resp *http.Response, taskList [
 		Name:    object,
 		Version: "", // versionID not supported for obj PUT
 	}
-	var objSize int64
-	objInfo, err := client.S3().StatObject(ctx, bucket, object, mclient.StatObjectOptions{})
-	if err != nil {
-		zerolog.Ctx(ctx).Err(err).Msg("unable to get uploaded object size")
-		err = nil
-	} else {
-		objSize = objInfo.Size
-	}
 
 	taskList = append(taskList, &tasks.ObjectSyncPayload{
-		Object:  obj,
-		ObjSize: objSize,
+		Object: obj,
 	})
 	if hasACLChanged(req) {
 		taskList = append(taskList, &tasks.ObjSyncACLPayload{

@@ -56,6 +56,10 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 		return err
 	}
 
+	if p.Deleted {
+		return s.objectDelete(ctx, p)
+	}
+
 	objectLockID := entity.NewVersionedObjectLockID(p.ID.ToStorage(), toBucket, p.Object.Name, p.Object.Version)
 	lock, err := s.objectLocker.Lock(ctx, objectLockID)
 	if err != nil {

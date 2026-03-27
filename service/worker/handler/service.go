@@ -42,6 +42,7 @@ type Config struct {
 	TaskCheckInterval        time.Duration  `yaml:"taskCheckInterval"`
 	DelayedTaskCheckInterval time.Duration  `yaml:"delayedTaskCheckInterval"`
 	CustomErrRetryInterval   *time.Duration `yaml:"customErrRetryInterval,omitempty"`
+	MaxListedObjectsPerTask  int            `yaml:"maxListedObjectsPerTask,omitempty"`
 }
 
 func (c *Config) Validate() error {

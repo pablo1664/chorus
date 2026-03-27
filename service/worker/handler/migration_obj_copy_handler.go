@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
+	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
 
 	"github.com/clyso/chorus/pkg/dom"
@@ -91,6 +93,16 @@ func (s *svc) HandleMigrationObjCopy(ctx context.Context, t *asynq.Task) (err er
 	})
 	if err != nil {
 		if errors.Is(err, dom.ErrNotFound) {
+			// Some S3/Ceph implementations list directory markers (size=0, key ending
+			// with "/") in ListObjects but return 404 on StatObject. In that case,
+			// create an empty marker directly on the destination instead of skipping.
+			if p.Obj.Size == 0 && strings.HasSuffix(p.Obj.Name, "/") {
+				if dirErr := s.putDirMarker(ctx, p, toBucket); dirErr != nil {
+					return fmt.Errorf("migration obj copy: unable to create dir marker on destination: %w", dirErr)
+				}
+				logger.Info().Msg("migration obj copy: dir marker created on destination")
+				return nil
+			}
 			logger.Warn().Msg("migration obj copy: skip object sync: object missing in source")
 			return nil
 		}
@@ -107,4 +119,18 @@ func (s *svc) HandleMigrationObjCopy(ctx context.Context, t *asynq.Task) (err er
 	logger.Info().Msg("migration obj copy: done")
 
 	return nil
+}
+
+// putDirMarker creates an empty directory marker object on the destination.
+// Used when the source lists a directory marker but StatObject returns 404 (common in Ceph/RGW).
+func (s *svc) putDirMarker(ctx context.Context, p tasks.MigrateObjCopyPayload, toBucket string) error {
+	toClient, err := s.clients.AsS3(ctx, p.ID.ToStorage(), p.ID.User())
+	if err != nil {
+		return err
+	}
+	_, err = toClient.S3().PutObject(ctx, toBucket, p.Obj.Name, strings.NewReader(""), 0, mclient.PutObjectOptions{
+		ContentType:          "application/x-directory",
+		DisableContentSha256: true,
+	})
+	return err
 }

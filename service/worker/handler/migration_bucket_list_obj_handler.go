@@ -37,6 +37,13 @@ import (
 
 const cMaxListedObjectsPerTask = 1000
 
+func (s *svc) maxListedObjectsPerTask() int {
+	if s.conf.MaxListedObjectsPerTask > 0 {
+		return s.conf.MaxListedObjectsPerTask
+	}
+	return cMaxListedObjectsPerTask
+}
+
 func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) error {
 	// todo: aggregate task to not list multiple times
 	var p tasks.MigrateBucketListObjectsPayload
@@ -45,18 +52,13 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 	ctx = log.WithBucket(ctx, p.Bucket)
 	logger := zerolog.Ctx(ctx)
-	// acquire rate limits for source and destination storage before proceeding
+	// acquire rate limits for source storage before proceeding
 	if err := s.rateLimit(ctx, p.ID.FromStorage(), s3.ListObjects); err != nil {
 		logger.Debug().Err(err).Str(log.Storage, p.ID.FromStorage()).Msg("rate limit error")
 		return err
 	}
 
 	replicationID := p.GetReplicationID()
-
-	if err := s.limit.StorReq(ctx, p.ID.FromStorage()); err != nil {
-		logger.Debug().Err(err).Str(log.Storage, p.ID.FromStorage()).Msg("rate limit error")
-		return err
-	}
 
 	fromClient, err := s.clients.AsS3(ctx, p.ID.FromStorage(), p.ID.User())
 	if err != nil {
@@ -73,6 +75,7 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	defer cancel()
 	objects := fromClient.S3().ListObjects(listCtx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix, Recursive: true})
 	objectsNum := 0
+	lastProcessedKey := lastObjName
 	hitBatchLimit := false
 	for object := range objects {
 		if object.Err != nil {
@@ -88,10 +91,13 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 				return fmt.Errorf("migration bucket list obj: unable to enqueue task: %w", err)
 			}
 		}
-		if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
-			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
+		if objectsNum%100 == 0 {
+			if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
+				return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
+			}
 		}
-		if objectsNum >= cMaxListedObjectsPerTask {
+		lastProcessedKey = object.Key
+		if objectsNum >= s.maxListedObjectsPerTask() {
 			hitBatchLimit = true
 			cancel()
 			break
@@ -102,6 +108,10 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	if hitBatchLimit {
+		// checkpoint the last processed object before re-enqueueing
+		if err = s.listStateStore.Set(ctx, migrationID, lastProcessedKey); err != nil {
+			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
+		}
 		if err = s.queueSvc.EnqueueTask(ctx, p); err != nil {
 			return fmt.Errorf("migration bucket list obj: unable to enqueue continuation task: %w", err)
 		}
