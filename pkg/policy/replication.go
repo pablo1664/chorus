@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
@@ -163,6 +164,14 @@ func (r *policySvc) buildQueueStats(ctx context.Context, queue string) (bool, en
 		return false, entity.QueueStats{}, nil
 	}
 	if err != nil {
+		// The asynq MEMORY USAGE Lua script can hit a race condition when a task
+		// hash is deleted between the LRANGE sampling and the MEMORY USAGE call,
+		// causing arithmetic on a boolean value. This is transient and non-fatal:
+		// return empty stats so ListReplications does not fail for display-only data.
+		if strings.Contains(err.Error(), "redis eval error") {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("queue", queue).Msg("queue stats: skipping memory usage due to transient Redis error")
+			return false, entity.QueueStats{}, nil
+		}
 		return false, entity.QueueStats{}, fmt.Errorf("unable to get queue stats for %s: %w", queue, err)
 	}
 	return stats.Paused, entity.QueueStats{
