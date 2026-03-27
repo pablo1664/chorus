@@ -66,9 +66,14 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	migrationID := entity.NewMigrationObjectIDFromUniversalReplicationID(p.ID, p.Bucket, p.Prefix)
-	lastObjName, err := s.listStateStore.Get(ctx, migrationID)
-	if err != nil && !errors.Is(err, dom.ErrNotFound) {
-		return fmt.Errorf("unable to get last listed object: %w", err)
+	// Use StartAfter from payload if provided (continuation task), else get from store
+	lastObjName := p.StartAfter
+	if lastObjName == "" {
+		var err error
+		lastObjName, err = s.listStateStore.Get(ctx, migrationID)
+		if err != nil && !errors.Is(err, dom.ErrNotFound) {
+			return fmt.Errorf("unable to get last listed object: %w", err)
+		}
 	}
 
 	listCtx, cancel := context.WithCancel(ctx)
@@ -112,6 +117,8 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 		if err = s.listStateStore.Set(ctx, migrationID, lastProcessedKey); err != nil {
 			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
 		}
+		// Update StartAfter cursor for continuation
+		p.StartAfter = lastProcessedKey
 		if err = s.queueSvc.EnqueueTask(ctx, p); err != nil {
 			return fmt.Errorf("migration bucket list obj: unable to enqueue continuation task: %w", err)
 		}
