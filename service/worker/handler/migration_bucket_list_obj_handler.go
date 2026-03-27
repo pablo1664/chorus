@@ -76,76 +76,18 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 		objectsNum++
 		isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 		logger.Debug().Str(log.Object, object.Key).Str("obj_version_id", object.VersionID).Bool("is_dir", isDir).Msg("migration bucket list obj: start processing object from the list")
-		if isDir {
-			if features.DirectoryMarkers(ctx) {
-				if p.Versioned {
-					task := tasks.ListObjectVersionsPayload{
-						Bucket: p.Bucket,
-						Prefix: object.Key,
-					}
-					task.SetReplicationID(replicationID)
-					if err = s.queueSvc.EnqueueTask(ctx, task); err != nil {
-						return fmt.Errorf("unable to create list object versions task for directory marker: %w", err)
-					}
-				} else {
-					task := tasks.MigrateObjCopyPayload{
-						Bucket: p.Bucket,
-						Obj: tasks.ObjPayload{
-							Name:        object.Key,
-							VersionID:   object.VersionID,
-							ETag:        object.ETag,
-							Size:        object.Size,
-							ContentType: object.ContentType,
-						},
-					}
-					task.SetReplicationID(replicationID)
-					if err = s.queueSvc.EnqueueTask(ctx, task); err != nil {
-						return fmt.Errorf("migration bucket list obj: unable to create copy task for directory marker: %w", err)
-					}
-				}
-			}
-
-			subP := p
-			subP.Prefix = object.Key
-			if err = s.queueSvc.EnqueueTask(ctx, subP); err != nil {
-				return fmt.Errorf("migration bucket list obj: unable to enqueue list obj sub task: %w", err)
-			}
-			err = s.listStateStore.Set(ctx, migrationID, object.Key)
-			if err != nil {
-				return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
-			}
-			continue
-		}
-
-		if p.Versioned {
-			task := tasks.ListObjectVersionsPayload{
-				Bucket: p.Bucket,
-				Prefix: object.Key,
-			}
-			task.SetReplicationID(replicationID)
+		tasksToEnqueue, dirObj := tasksForListedObject(ctx, p, object, replicationID)
+		for _, task := range tasksToEnqueue {
 			err = s.queueSvc.EnqueueTask(ctx, task)
 			if err != nil {
-				return fmt.Errorf("unable to create list object versions task: %w", err)
-			}
-		} else {
-			task := tasks.MigrateObjCopyPayload{
-				Bucket: p.Bucket,
-				Obj: tasks.ObjPayload{
-					Name:        object.Key,
-					VersionID:   object.VersionID,
-					ETag:        object.ETag,
-					Size:        object.Size,
-					ContentType: object.ContentType,
-				},
-			}
-			task.SetReplicationID(replicationID)
-			err = s.queueSvc.EnqueueTask(ctx, task)
-			if err != nil {
-				return fmt.Errorf("migration bucket list obj: unable to create copy obj task: %w", err)
+				return fmt.Errorf("migration bucket list obj: unable to enqueue task: %w", err)
 			}
 		}
 		if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
 			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
+		}
+		if dirObj {
+			continue
 		}
 	}
 
@@ -167,4 +109,62 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 
 	logger.Info().Msg("migration bucket list obj: done")
 	return nil
+}
+
+func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsPayload, object mclient.ObjectInfo, replicationID entity.UniversalReplicationID) ([]any, bool) {
+	isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
+	if isDir {
+		res := make([]any, 0, 2)
+		if features.DirectoryMarkers(ctx) {
+			if p.Versioned {
+				task := tasks.ListObjectVersionsPayload{
+					Bucket: p.Bucket,
+					Prefix: object.Key,
+				}
+				task.SetReplicationID(replicationID)
+				res = append(res, task)
+			} else {
+				task := tasks.MigrateObjCopyPayload{
+					Bucket: p.Bucket,
+					Obj: tasks.ObjPayload{
+						Name:        object.Key,
+						VersionID:   object.VersionID,
+						ETag:        object.ETag,
+						Size:        object.Size,
+						ContentType: object.ContentType,
+					},
+				}
+				task.SetReplicationID(replicationID)
+				res = append(res, task)
+			}
+		}
+
+		subP := p
+		subP.Prefix = object.Key
+		res = append(res, subP)
+
+		return res, true
+	}
+
+	if p.Versioned {
+		task := tasks.ListObjectVersionsPayload{
+			Bucket: p.Bucket,
+			Prefix: object.Key,
+		}
+		task.SetReplicationID(replicationID)
+		return []any{task}, false
+	}
+
+	task := tasks.MigrateObjCopyPayload{
+		Bucket: p.Bucket,
+		Obj: tasks.ObjPayload{
+			Name:        object.Key,
+			VersionID:   object.VersionID,
+			ETag:        object.ETag,
+			Size:        object.Size,
+			ContentType: object.ContentType,
+		},
+	}
+	task.SetReplicationID(replicationID)
+	return []any{task}, false
 }
