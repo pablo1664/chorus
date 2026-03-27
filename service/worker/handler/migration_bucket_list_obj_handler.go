@@ -35,6 +35,8 @@ import (
 	"github.com/clyso/chorus/pkg/tasks"
 )
 
+const cMaxListedObjectsPerTask = 1000
+
 func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) error {
 	// todo: aggregate task to not list multiple times
 	var p tasks.MigrateBucketListObjectsPayload
@@ -67,8 +69,11 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 		return fmt.Errorf("unable to get last listed object: %w", err)
 	}
 
-	objects := fromClient.S3().ListObjects(ctx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix})
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	objects := fromClient.S3().ListObjects(listCtx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix, Recursive: true})
 	objectsNum := 0
+	hitBatchLimit := false
 	for object := range objects {
 		if object.Err != nil {
 			return fmt.Errorf("migration bucket list obj: list objects error %w", object.Err)
@@ -86,9 +91,22 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 		if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
 			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
 		}
+		if objectsNum >= cMaxListedObjectsPerTask {
+			hitBatchLimit = true
+			cancel()
+			break
+		}
 		if dirObj {
 			continue
 		}
+	}
+
+	if hitBatchLimit {
+		if err = s.queueSvc.EnqueueTask(ctx, p); err != nil {
+			return fmt.Errorf("migration bucket list obj: unable to enqueue continuation task: %w", err)
+		}
+		logger.Info().Int("listed_objects", objectsNum).Msg("migration bucket list obj: batch limit reached, continuation task enqueued")
+		return nil
 	}
 
 	if lastObjName == "" && objectsNum == 0 && p.Prefix != "" {
@@ -114,7 +132,7 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsPayload, object mclient.ObjectInfo, replicationID entity.UniversalReplicationID) ([]any, bool) {
 	isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 	if isDir {
-		res := make([]any, 0, 2)
+		res := make([]any, 0, 1)
 		if features.DirectoryMarkers(ctx) {
 			if p.Versioned {
 				task := tasks.ListObjectVersionsPayload{
@@ -138,10 +156,6 @@ func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsP
 				res = append(res, task)
 			}
 		}
-
-		subP := p
-		subP.Prefix = object.Key
-		res = append(res, subP)
 
 		return res, true
 	}
