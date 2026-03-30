@@ -55,11 +55,30 @@ func CheckSchemaCompatibility(ctx context.Context, chorusVersion string, client 
 	onlySchemaVersionKey := len(keys) == 1 && keys[0] == schemaVersionKey
 
 	if !onlySchemaVersionKey && len(keys) > 0 {
-		supportedVersion := supportedSchemaVersions[version]
-		return fmt.Errorf("%w: Chorus version %s is incompatible with existing Redis schema from previous Chorus installations. Please remove all data in Redis to continue with the current version, or use Chorus %s", dom.ErrInternal, chorusVersion, supportedVersion)
+		// Skip the compatibility check for development builds or branch builds without a
+		// proper semver tag. In these cases, set the current schema version and continue.
+		// A proper release tag starts with 'v' followed by semver (e.g. v0.6.0, no extra dashes).
+		isRelease := false
+		if len(chorusVersion) > 1 && chorusVersion[0] == 'v' {
+			// Check it is a clean semver: no '-' after the version numbers
+			// e.g. "v0.6.0" → release, "v0.5.15-42-gf9bea33" → not a release
+			semver := chorusVersion[1:]
+			hasExtraDash := false
+			for _, c := range semver {
+				if c == '-' {
+					hasExtraDash = true
+					break
+				}
+			}
+			isRelease = !hasExtraDash
+		}
+		if isRelease {
+			supportedVersion := supportedSchemaVersions[version]
+			return fmt.Errorf("%w: Chorus version %s is incompatible with existing Redis schema from previous Chorus installations. Please remove all data in Redis to continue with the current version, or use Chorus %s", dom.ErrInternal, chorusVersion, supportedVersion)
+		}
 	}
-	// No legacy keys found, consider schema compatible
-	// Set the current schema version to not check again next time
+	// No legacy keys found (or dev/branch build): consider schema compatible.
+	// Set the current schema version to not check again next time.
 	err = client.Set(ctx, schemaVersionKey, currentSchemaVersion, 0).Err()
 	if err != nil {
 		return fmt.Errorf("failed to set schema version: %w", err)

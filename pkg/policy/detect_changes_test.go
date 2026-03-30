@@ -64,7 +64,7 @@ func TestCheckSchemaCompatibility(t *testing.T) {
 		err = c.Set(ctx, schemaVersionKey, 2, 0).Err()
 		r.NoError(err)
 
-		err = CheckSchemaCompatibility(ctx, "", c)
+		err = CheckSchemaCompatibility(ctx, "v0.6.0", c)
 		r.Error(err)
 		r.ErrorIs(err, dom.ErrInternal)
 		r.Contains(err.Error(), "v0.6.0")
