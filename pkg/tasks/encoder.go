@@ -284,7 +284,7 @@ var (
 	}
 	migrateBucketListObjects = encoder[MigrateBucketListObjectsPayload]{
 		taskID: func(p MigrateBucketListObjectsPayload) string {
-			return toTaskID("mgr:lo", p.ID.AsString(), p.Bucket, p.Prefix, p.StartAfter)
+			return toTaskID("mgr:lo", p.ID.AsString(), p.Bucket, p.Prefix)
 		},
 		queue: func(p MigrateBucketListObjectsPayload) string {
 			return initMigrationListQueue(&p)

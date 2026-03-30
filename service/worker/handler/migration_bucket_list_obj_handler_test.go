@@ -22,13 +22,18 @@ func TestTasksForListedObject_DirectoryMarker_NonVersioned_FeatureEnabled(t *tes
 
 	r := require.New(t)
 	r.True(isDir)
-	r.Len(enqueued, 1)
+	r.Len(enqueued, 2)
 
 	copyTask, ok := enqueued[0].(tasks.MigrateObjCopyPayload)
 	r.True(ok)
 	r.Equal("bkt", copyTask.Bucket)
 	r.Equal("photos/", copyTask.Obj.Name)
 	r.EqualValues(0, copyTask.Obj.Size)
+
+	subListTask, ok := enqueued[1].(tasks.MigrateBucketListObjectsPayload)
+	r.True(ok)
+	r.Equal("bkt", subListTask.Bucket)
+	r.Equal("photos/", subListTask.Prefix)
 }
 
 func TestTasksForListedObject_DirectoryMarker_NonVersioned_FeatureDisabled(t *testing.T) {
@@ -42,7 +47,12 @@ func TestTasksForListedObject_DirectoryMarker_NonVersioned_FeatureDisabled(t *te
 
 	r := require.New(t)
 	r.True(isDir)
-	r.Empty(enqueued)
+	r.Len(enqueued, 1)
+
+	subListTask, ok := enqueued[0].(tasks.MigrateBucketListObjectsPayload)
+	r.True(ok)
+	r.Equal("bkt", subListTask.Bucket)
+	r.Equal("photos/", subListTask.Prefix)
 }
 
 func TestTasksForListedObject_DirectoryMarker_Versioned_FeatureEnabled(t *testing.T) {
@@ -56,12 +66,17 @@ func TestTasksForListedObject_DirectoryMarker_Versioned_FeatureEnabled(t *testin
 
 	r := require.New(t)
 	r.True(isDir)
-	r.Len(enqueued, 1)
+	r.Len(enqueued, 2)
 
 	listVersionsTask, ok := enqueued[0].(tasks.ListObjectVersionsPayload)
 	r.True(ok)
 	r.Equal("bkt", listVersionsTask.Bucket)
 	r.Equal("photos/", listVersionsTask.Prefix)
+
+	subListTask, ok := enqueued[1].(tasks.MigrateBucketListObjectsPayload)
+	r.True(ok)
+	r.Equal("bkt", subListTask.Bucket)
+	r.Equal("photos/", subListTask.Prefix)
 }
 
 func TestTasksForListedObject_RegularObject_NonVersioned(t *testing.T) {

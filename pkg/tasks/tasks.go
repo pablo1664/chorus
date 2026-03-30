@@ -200,10 +200,9 @@ type MigrateS3UserPayload struct {
 
 type MigrateBucketListObjectsPayload struct {
 	replicationID
-	Bucket     string
-	Prefix     string
-	StartAfter string // cursor for pagination: list continues from this object key
-	Versioned  bool
+	Bucket    string
+	Prefix    string
+	Versioned bool
 }
 
 type MigrateObjCopyPayload struct {

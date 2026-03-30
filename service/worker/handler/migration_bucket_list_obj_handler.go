@@ -35,15 +35,6 @@ import (
 	"github.com/clyso/chorus/pkg/tasks"
 )
 
-const cMaxListedObjectsPerTask = 1000
-
-func (s *svc) maxListedObjectsPerTask() int {
-	if s.conf.MaxListedObjectsPerTask > 0 {
-		return s.conf.MaxListedObjectsPerTask
-	}
-	return cMaxListedObjectsPerTask
-}
-
 func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) error {
 	// todo: aggregate task to not list multiple times
 	var p tasks.MigrateBucketListObjectsPayload
@@ -66,22 +57,13 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	migrationID := entity.NewMigrationObjectIDFromUniversalReplicationID(p.ID, p.Bucket, p.Prefix)
-	// Use StartAfter from payload if provided (continuation task), else get from store
-	lastObjName := p.StartAfter
-	if lastObjName == "" {
-		var err error
-		lastObjName, err = s.listStateStore.Get(ctx, migrationID)
-		if err != nil && !errors.Is(err, dom.ErrNotFound) {
-			return fmt.Errorf("unable to get last listed object: %w", err)
-		}
+	lastObjName, err := s.listStateStore.Get(ctx, migrationID)
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
+		return fmt.Errorf("unable to get last listed object: %w", err)
 	}
 
-	listCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	objects := fromClient.S3().ListObjects(listCtx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix, Recursive: true})
+	objects := fromClient.S3().ListObjects(ctx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix})
 	objectsNum := 0
-	lastProcessedKey := lastObjName
-	hitBatchLimit := false
 	for object := range objects {
 		if object.Err != nil {
 			return fmt.Errorf("migration bucket list obj: list objects error %w", object.Err)
@@ -96,34 +78,12 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 				return fmt.Errorf("migration bucket list obj: unable to enqueue task: %w", err)
 			}
 		}
-		if objectsNum%100 == 0 {
-			if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
-				return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
-			}
-		}
-		lastProcessedKey = object.Key
-		if objectsNum >= s.maxListedObjectsPerTask() {
-			hitBatchLimit = true
-			cancel()
-			break
+		if err = s.listStateStore.Set(ctx, migrationID, object.Key); err != nil {
+			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
 		}
 		if dirObj {
 			continue
 		}
-	}
-
-	if hitBatchLimit {
-		// checkpoint the last processed object before re-enqueueing
-		if err = s.listStateStore.Set(ctx, migrationID, lastProcessedKey); err != nil {
-			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
-		}
-		// Update StartAfter cursor for continuation
-		p.StartAfter = lastProcessedKey
-		if err = s.queueSvc.EnqueueTask(ctx, p); err != nil {
-			return fmt.Errorf("migration bucket list obj: unable to enqueue continuation task: %w", err)
-		}
-		logger.Info().Int("listed_objects", objectsNum).Msg("migration bucket list obj: batch limit reached, continuation task enqueued")
-		return nil
 	}
 
 	if lastObjName == "" && objectsNum == 0 && p.Prefix != "" {
@@ -149,7 +109,7 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsPayload, object mclient.ObjectInfo, replicationID entity.UniversalReplicationID) ([]any, bool) {
 	isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 	if isDir {
-		res := make([]any, 0, 1)
+		res := make([]any, 0, 2)
 		if features.DirectoryMarkers(ctx) {
 			if p.Versioned {
 				task := tasks.ListObjectVersionsPayload{
@@ -173,6 +133,9 @@ func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsP
 				res = append(res, task)
 			}
 		}
+		subP := tasks.MigrateBucketListObjectsPayload{Bucket: p.Bucket, Prefix: object.Key, Versioned: p.Versioned}
+		subP.SetReplicationID(replicationID)
+		res = append(res, subP)
 
 		return res, true
 	}
