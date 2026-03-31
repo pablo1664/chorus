@@ -83,15 +83,10 @@ func (s svc) WorkerInProgressBytesInc(ctx context.Context, bytes int64) {
 	if !s.enabled {
 		return
 	}
-	labels := prometheus.Labels{}
-	if flow := xctx.GetFlow(ctx); flow != "" {
-		labels["flow"] = string(flow)
-	}
-	if user := xctx.GetUser(ctx); user != "" {
-		labels["user"] = user
-	}
-	if bucket := xctx.GetBucket(ctx); bucket != "" {
-		labels["bucket"] = bucket
+	labels := prometheus.Labels{
+		"flow":   string(xctx.GetFlow(ctx)),
+		"user":   xctx.GetUser(ctx),
+		"bucket": xctx.GetBucket(ctx),
 	}
 	copyInProgressBytes.With(labels).Add(float64(bytes))
 }
@@ -100,15 +95,10 @@ func (s svc) WorkerInProgressBytesDec(ctx context.Context, bytes int64) {
 	if !s.enabled {
 		return
 	}
-	labels := prometheus.Labels{}
-	if flow := xctx.GetFlow(ctx); flow != "" {
-		labels["flow"] = string(flow)
-	}
-	if user := xctx.GetUser(ctx); user != "" {
-		labels["user"] = user
-	}
-	if bucket := xctx.GetBucket(ctx); bucket != "" {
-		labels["bucket"] = bucket
+	labels := prometheus.Labels{
+		"flow":   string(xctx.GetFlow(ctx)),
+		"user":   xctx.GetUser(ctx),
+		"bucket": xctx.GetBucket(ctx),
 	}
 	copyInProgressBytes.With(labels).Sub(float64(bytes))
 }
