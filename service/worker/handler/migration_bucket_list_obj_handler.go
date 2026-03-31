@@ -154,19 +154,24 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 }
 
 func (s *svc) isSourceDirectoryMarker(ctx context.Context, storage string, fromClient s3client.Client, bucket, name string) (bool, error) {
+	logger := zerolog.Ctx(ctx)
 	if err := s.rateLimit(ctx, storage, s3.HeadObject); err != nil {
+		logger.Warn().Err(err).Str("marker", name).Msg("isSourceDirectoryMarker: rate limit error")
 		return false, err
 	}
 
 	_, err := fromClient.S3().StatObject(ctx, bucket, name, mclient.StatObjectOptions{})
 	if err == nil {
+		logger.Debug().Str("marker", name).Msg("isSourceDirectoryMarker: marker exists")
 		return true, nil
 	}
 
 	var errorResp mclient.ErrorResponse
 	if errors.As(err, &errorResp) && (errorResp.Code == mclient.NoSuchKey || errorResp.StatusCode == http.StatusNotFound) {
+		logger.Debug().Str("marker", name).Str("code", errorResp.Code).Int("status", errorResp.StatusCode).Msg("isSourceDirectoryMarker: marker not found (virtual prefix)")
 		return false, nil
 	}
 
+	logger.Warn().Err(err).Str("marker", name).Msg("isSourceDirectoryMarker: StatObject error")
 	return false, err
 }
