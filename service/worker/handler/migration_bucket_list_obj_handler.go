@@ -94,10 +94,12 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 				}
 			}
 
-			subP := p
-			subP.Prefix = object.Key
-			if err = s.queueSvc.EnqueueTask(ctx, subP); err != nil {
-				return fmt.Errorf("migration bucket list obj: unable to enqueue list obj sub task: %w", err)
+			if object.Key != p.Prefix {
+				subP := p
+				subP.Prefix = object.Key
+				if err = s.queueSvc.EnqueueTask(ctx, subP); err != nil {
+					return fmt.Errorf("migration bucket list obj: unable to enqueue list obj sub task: %w", err)
+				}
 			}
 			err = s.listStateStore.Set(ctx, migrationID, object.Key)
 			if err != nil {
