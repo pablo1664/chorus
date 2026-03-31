@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/clyso/chorus/pkg/dom"
 )
@@ -56,10 +57,11 @@ type QueueStats struct {
 	Latency time.Duration
 }
 
-func NewQueueService(client *asynq.Client, inspector *asynq.Inspector) *queueService {
+func NewQueueService(client *asynq.Client, inspector *asynq.Inspector, rawClient redis.UniversalClient) *queueService {
 	return &queueService{
 		inspector: inspector,
 		client:    client,
+		rawClient: rawClient,
 	}
 }
 
@@ -68,6 +70,7 @@ var _ QueueService = (*queueService)(nil)
 type queueService struct {
 	inspector *asynq.Inspector
 	client    *asynq.Client
+	rawClient redis.UniversalClient
 }
 
 func (q *queueService) EnqueueTask(ctx context.Context, task any) error {
@@ -77,6 +80,12 @@ func (q *queueService) EnqueueTask(ctx context.Context, task any) error {
 func (q *queueService) Stats(ctx context.Context, queueName string) (*QueueStats, error) {
 	info, err := q.getInfo(ctx, queueName)
 	if err != nil {
+		// The asynq MEMORY USAGE Lua script can fail due to a race condition when a
+		// task hash is deleted between LRANGE sampling and the MEMORY USAGE call.
+		// Fall back to direct Redis queries so callers receive real task counts.
+		if strings.Contains(err.Error(), "redis eval error") && q.rawClient != nil {
+			return q.basicStats(ctx, queueName)
+		}
 		return nil, err
 	}
 	return &QueueStats{
@@ -85,6 +94,29 @@ func (q *queueService) Stats(ctx context.Context, queueName string) (*QueueStats
 		Paused:         info.Paused,
 		MemoryUsage:    info.MemoryUsage,
 		Latency:        info.Latency,
+	}, nil
+}
+
+// basicStats queries task counts directly via Redis LLEN/ZCARD without invoking
+// the MEMORY USAGE Lua script. Used as a fallback when GetQueueInfo fails.
+func (q *queueService) basicStats(ctx context.Context, queueName string) (*QueueStats, error) {
+	prefix := "asynq:{" + queueName + "}:"
+	pipe := q.rawClient.Pipeline()
+	pending := pipe.LLen(ctx, prefix+"pending")
+	active := pipe.LLen(ctx, prefix+"active")
+	scheduled := pipe.ZCard(ctx, prefix+"scheduled")
+	retry := pipe.ZCard(ctx, prefix+"retry")
+	paused := pipe.Exists(ctx, prefix+"paused")
+	processed := pipe.Get(ctx, prefix+"processed")
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("basicStats fallback for %s: %w", queueName, err)
+	}
+	processedTotal, _ := processed.Int()
+	unprocessed := int(pending.Val()) + int(active.Val()) + int(scheduled.Val()) + int(retry.Val())
+	return &QueueStats{
+		Unprocessed:    unprocessed,
+		ProcessedTotal: processedTotal,
+		Paused:         paused.Val() > 0,
 	}, nil
 }
 

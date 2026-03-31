@@ -24,7 +24,7 @@ func Test_queueService_UnprocessedCount(t *testing.T) {
 		client.Close()
 		inspector.Close()
 	})
-	qs := NewQueueService(client, inspector)
+	qs := NewQueueService(client, inspector, c)
 
 	r := require.New(t)
 	queueName := "test-queue-is-empty"
@@ -123,7 +123,7 @@ func Test_queueService_RetriedTasksCountAsUnprocessed(t *testing.T) {
 	defer inspector.Close()
 	client := asynq.NewClientFromRedisClient(c)
 	defer client.Close()
-	qs := NewQueueService(client, inspector)
+	qs := NewQueueService(client, inspector, c)
 
 	r := require.New(t)
 	queueName := "test-queue-is-empty-with-retry"
@@ -191,7 +191,7 @@ func Test_queueService_PauseResume(t *testing.T) {
 	defer inspector.Close()
 	client := asynq.NewClientFromRedisClient(c)
 	defer client.Close()
-	qs := NewQueueService(client, inspector)
+	qs := NewQueueService(client, inspector, c)
 
 	r := require.New(t)
 	queueName := "test-queue-pause-resume"
@@ -249,7 +249,7 @@ func Test_queueService_Stats(t *testing.T) {
 	defer inspector.Close()
 	client := asynq.NewClientFromRedisClient(c)
 	defer client.Close()
-	qs := NewQueueService(client, inspector)
+	qs := NewQueueService(client, inspector, c)
 
 	r := require.New(t)
 	queueName := "test-queue-stats"
@@ -304,7 +304,7 @@ func Test_queueService_Enqueue(t *testing.T) {
 	defer inspector.Close()
 	client := asynq.NewClientFromRedisClient(c)
 	defer client.Close()
-	qs := NewQueueService(client, inspector)
+	qs := NewQueueService(client, inspector, c)
 
 	r := require.New(t)
 

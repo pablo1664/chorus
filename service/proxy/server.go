@@ -96,7 +96,9 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	defer taskClient.Close()
 	inspector := asynq.NewInspector(queueRedis)
 	defer inspector.Close()
-	queueSvc := tasks.NewQueueService(taskClient, inspector)
+	queueRawRedis := util.NewRedis(conf.Redis, conf.Redis.QueueDB)
+	defer queueRawRedis.Close()
+	queueSvc := tasks.NewQueueService(taskClient, inspector, queueRawRedis)
 	err = policy.CheckSchemaCompatibility(ctx, app.Version, confRedis)
 	if err != nil {
 		return err
