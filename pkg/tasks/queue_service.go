@@ -88,8 +88,9 @@ func (q *queueService) Stats(ctx context.Context, queueName string) (*QueueStats
 		}
 		return nil, err
 	}
+	unprocessed := info.Pending + info.Active + info.Scheduled + info.Retry
 	return &QueueStats{
-		Unprocessed:    info.Size,
+		Unprocessed:    unprocessed,
 		ProcessedTotal: info.ProcessedTotal,
 		Paused:         info.Paused,
 		MemoryUsage:    info.MemoryUsage,
