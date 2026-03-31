@@ -15,12 +15,14 @@
 package copy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	awss3 "github.com/aws/aws-sdk-go/service/s3"
@@ -345,6 +347,27 @@ func (r *S3CopySvc) CopyObject(ctx context.Context, user string, from File, to F
 		Debug().
 		Str("file_size", util.ByteCountSI(fromObjectSize)).
 		Msg("starting obj copy")
+	if fromObjectSize == 0 && strings.HasSuffix(from.Name, "/") {
+		putObjectOpts.DisableContentSha256 = true
+		if !toStorage.IsSecure {
+			putObjectOpts.DisableContentSha256 = true
+		}
+		info, err := toClient.S3().PutObject(ctx, to.Bucket, to.Name, bytes.NewReader(nil), 0, putObjectOpts)
+		if err != nil {
+			return fmt.Errorf("unable to create directory marker object: %w", err)
+		}
+		if info.VersionID != "" {
+			to.Version = info.VersionID
+		}
+
+		if features.ACL(ctx) {
+			if err := r.CopyACLs(ctx, user, from, to); err != nil {
+				return fmt.Errorf("unable to copy acl %w", err)
+			}
+		}
+
+		return nil
+	}
 
 	r.metricsSvc.WorkerInProgressBytesInc(ctx, fromObjectSize)
 	defer r.metricsSvc.WorkerInProgressBytesDec(ctx, fromObjectSize)

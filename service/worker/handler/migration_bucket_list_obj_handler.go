@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/hibiken/asynq"
@@ -31,6 +32,7 @@ import (
 	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/tasks"
 )
 
@@ -67,15 +69,31 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	objects := fromClient.S3().ListObjects(ctx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix})
-	objectsNum := 0
 	for object := range objects {
 		if object.Err != nil {
 			return fmt.Errorf("migration bucket list obj: list objects error %w", object.Err)
 		}
-		objectsNum++
 		isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 		logger.Debug().Str(log.Object, object.Key).Str("obj_version_id", object.VersionID).Bool("is_dir", isDir).Msg("migration bucket list obj: start processing object from the list")
 		if isDir {
+			isMarker, err := s.isSourceDirectoryMarker(ctx, p.ID.FromStorage(), fromClient, p.Bucket, object.Key)
+			if err != nil {
+				return fmt.Errorf("migration bucket list obj: unable to detect directory marker %q: %w", object.Key, err)
+			}
+			if isMarker {
+				task := tasks.MigrateObjCopyPayload{
+					Bucket: p.Bucket,
+					Obj: tasks.ObjPayload{
+						Name: object.Key,
+						Size: object.Size,
+					},
+				}
+				task.SetReplicationID(replicationID)
+				if err = s.queueSvc.EnqueueTask(ctx, task); err != nil {
+					return fmt.Errorf("migration bucket list obj: unable to create copy dir marker task: %w", err)
+				}
+			}
+
 			subP := p
 			subP.Prefix = object.Key
 			if err = s.queueSvc.EnqueueTask(ctx, subP); err != nil {
@@ -119,23 +137,26 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 			return fmt.Errorf("migration bucket list obj: unable to update last obj meta: %w", err)
 		}
 	}
-
-	if lastObjName == "" && objectsNum == 0 && p.Prefix != "" {
-		// copy empty dir object
-		task := tasks.MigrateObjCopyPayload{
-			Bucket: p.Bucket,
-			Obj: tasks.ObjPayload{
-				Name: p.Prefix,
-			},
-		}
-		task.SetReplicationID(replicationID)
-		err = s.queueSvc.EnqueueTask(ctx, task)
-		if err != nil {
-			return fmt.Errorf("migration bucket list obj: unable to enqueue copy obj task: %w", err)
-		}
-	}
 	_, _ = s.listStateStore.Drop(ctx, migrationID)
 
 	logger.Info().Msg("migration bucket list obj: done")
 	return nil
+}
+
+func (s *svc) isSourceDirectoryMarker(ctx context.Context, storage string, fromClient s3client.Client, bucket, name string) (bool, error) {
+	if err := s.rateLimit(ctx, storage, s3.HeadObject); err != nil {
+		return false, err
+	}
+
+	_, err := fromClient.S3().StatObject(ctx, bucket, name, mclient.StatObjectOptions{})
+	if err == nil {
+		return true, nil
+	}
+
+	var errorResp mclient.ErrorResponse
+	if errors.As(err, &errorResp) && (errorResp.Code == mclient.NoSuchKey || errorResp.StatusCode == http.StatusNotFound) {
+		return false, nil
+	}
+
+	return false, err
 }
