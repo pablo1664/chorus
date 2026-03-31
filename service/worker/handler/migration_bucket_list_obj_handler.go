@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hibiken/asynq"
 	mclient "github.com/minio/minio-go/v7"
@@ -33,6 +34,18 @@ import (
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/tasks"
+)
+
+const (
+	// cBackpressureThreshold is the maximum number of unprocessed copy tasks allowed in the
+	// migration copy queue before the listing handler pauses to let workers catch up.
+	// Keeping the queue bounded prevents Redis from accumulating tens of millions of keys
+	// which degrades overall Redis performance.
+	cBackpressureThreshold = 500_000
+	// cBackpressureCheckInterval controls how often (in listed objects) the copy queue depth
+	// is checked. Checking every object would be too expensive; every 10k is a good balance.
+	cBackpressureCheckInterval = 10_000
+	cBackpressureRetryIn       = 30 * time.Second
 )
 
 func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) error {
@@ -50,6 +63,13 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	replicationID := p.GetReplicationID()
+
+	// Check copy queue depth before starting to list. Return early if the queue is already
+	// saturated so that copy workers get a chance to drain it before more tasks are added.
+	copyQueue := tasks.InitMigrationCopyQueue(replicationID)
+	if err := s.checkCopyQueueBackpressure(ctx, copyQueue); err != nil {
+		return err
+	}
 
 	fromClient, err := s.clients.AsS3(ctx, p.ID.FromStorage(), p.ID.User())
 	if err != nil {
@@ -69,6 +89,13 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 			return fmt.Errorf("migration bucket list obj: list objects error %w", object.Err)
 		}
 		objectsNum++
+		// Periodically re-check copy queue depth inside the loop so that a long-running
+		// listing task does not enqueue millions of copy tasks in one shot.
+		if objectsNum%cBackpressureCheckInterval == 0 {
+			if bpErr := s.checkCopyQueueBackpressure(ctx, copyQueue); bpErr != nil {
+				return bpErr
+			}
+		}
 		isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 		logger.Debug().Str(log.Object, object.Key).Str("obj_version_id", object.VersionID).Bool("is_dir", isDir).Msg("migration bucket list obj: start processing object from the list")
 		tasksToEnqueue, dirObj := tasksForListedObject(ctx, p, object, replicationID)
@@ -161,4 +188,26 @@ func tasksForListedObject(ctx context.Context, p tasks.MigrateBucketListObjectsP
 	}
 	task.SetReplicationID(replicationID)
 	return []any{task}, false
+}
+
+// checkCopyQueueBackpressure returns ErrRateLimitExceeded if the migration copy queue has
+// more than cBackpressureThreshold unprocessed tasks. Errors querying queue stats are logged
+// and ignored so that a Redis hiccup does not stall migration permanently.
+func (s *svc) checkCopyQueueBackpressure(ctx context.Context, copyQueue string) error {
+	stats, err := s.queueSvc.Stats(ctx, copyQueue)
+	if err != nil {
+		if !errors.Is(err, dom.ErrNotFound) {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("queue", copyQueue).Msg("migration list obj: failed to get copy queue stats for backpressure check")
+		}
+		return nil
+	}
+	if stats.Unprocessed > cBackpressureThreshold {
+		zerolog.Ctx(ctx).Info().
+			Int("unprocessed", stats.Unprocessed).
+			Int("threshold", cBackpressureThreshold).
+			Str("queue", copyQueue).
+			Msg("migration list obj: copy queue backpressure — pausing listing, will retry")
+		return &dom.ErrRateLimitExceeded{RetryIn: cBackpressureRetryIn}
+	}
+	return nil
 }
