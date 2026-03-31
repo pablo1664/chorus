@@ -44,8 +44,9 @@ const (
 	cBackpressureThreshold = 500_000
 	// cBackpressureCheckInterval controls how often (in listed objects) the copy queue depth
 	// is checked. Checking every object would be too expensive; every 10k is a good balance.
-	cBackpressureCheckInterval = 10_000
-	cBackpressureRetryIn       = 30 * time.Second
+	cBackpressureCheckInterval  = 10_000
+	cBackpressureRetryBase      = 20 * time.Second
+	cBackpressureRetryJitterMax = 25 * time.Second
 )
 
 func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) error {
@@ -202,12 +203,14 @@ func (s *svc) checkCopyQueueBackpressure(ctx context.Context, copyQueue string) 
 		return nil
 	}
 	if stats.Unprocessed > cBackpressureThreshold {
-		zerolog.Ctx(ctx).Info().
+		retryIn := cBackpressureRetryBase + time.Duration(time.Now().UnixNano()%int64(cBackpressureRetryJitterMax))
+		zerolog.Ctx(ctx).Debug().
 			Int("unprocessed", stats.Unprocessed).
 			Int("threshold", cBackpressureThreshold).
+			Dur("retry_in", retryIn).
 			Str("queue", copyQueue).
 			Msg("migration list obj: copy queue backpressure — pausing listing, will retry")
-		return &dom.ErrRateLimitExceeded{RetryIn: cBackpressureRetryIn}
+		return &dom.ErrRateLimitExceeded{RetryIn: retryIn}
 	}
 	return nil
 }

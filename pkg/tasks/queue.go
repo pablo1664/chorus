@@ -48,10 +48,11 @@ const (
 // Priority defines the priority of the queues from highest to lowest.
 var Priority = map[string]int{
 	string(QueueAPI): 200, // highest priority
+	// Prefer copy over list to maximize migration throughput once backlog exists.
+	string(QueueMigrateCopyObjectPrefix) + ":*":  120,
 	string(QueueMigrateListObjectsPrefix) + ":*": 100,
 	string(QueueDiff) + ":*":                     50,
 	string(QueueDiffFix) + ":*":                  50,
-	string(QueueMigrateCopyObjectPrefix) + ":*":  10,
 	string(QueueEventsPrefix) + ":*":             5, // lowest priority
 	"*":                                          1, // fallback for legacy queues
 }
