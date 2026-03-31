@@ -39,12 +39,17 @@ func tsToPb(ts *time.Time) *timestamppb.Timestamp {
 }
 
 func replicationToPb(id entity.UniversalReplicationID, value entity.ReplicationStatusExtended) *pb.Replication {
+	// Initial migration has two queues: listing and copy.
+	// Expose both in InitObj* counters so UI/CLI progress is not blind to listing backlog.
+	initListed := toListed(value.InitMigration) + toListed(value.InitMigrationListing)
+	initDone := int64(value.InitMigration.Done + value.InitMigrationListing.Done)
+
 	return &pb.Replication{
 		CreatedAt:     timestamppb.New(value.CreatedAt),
 		IsPaused:      value.IsPaused,
 		IsInitDone:    value.InitDone(),
-		InitObjListed: toListed(value.InitMigration),
-		InitObjDone:   int64(value.InitMigration.Done),
+		InitObjListed: initListed,
+		InitObjDone:   initDone,
 		Events:        toListed(value.EventMigration),
 		EventsDone:    int64(value.EventMigration.Done),
 		HasSwitch:     value.Switch != nil,

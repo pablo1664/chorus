@@ -69,18 +69,22 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 
 	objects := fromClient.S3().ListObjects(ctx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix})
+	objCount, dirCount, markerCount := 0, 0, 0
 	for object := range objects {
 		if object.Err != nil {
 			return fmt.Errorf("migration bucket list obj: list objects error %w", object.Err)
 		}
+		objCount++
 		isDir := object.Size == 0 && strings.HasSuffix(object.Key, "/")
 		logger.Debug().Str(log.Object, object.Key).Str("obj_version_id", object.VersionID).Bool("is_dir", isDir).Msg("migration bucket list obj: start processing object from the list")
 		if isDir {
+			dirCount++
 			isMarker, err := s.isSourceDirectoryMarker(ctx, p.ID.FromStorage(), fromClient, p.Bucket, object.Key)
 			if err != nil {
 				return fmt.Errorf("migration bucket list obj: unable to detect directory marker %q: %w", object.Key, err)
 			}
 			if isMarker {
+				markerCount++
 				task := tasks.MigrateObjCopyPayload{
 					Bucket: p.Bucket,
 					Obj: tasks.ObjPayload{
@@ -141,7 +145,11 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 	}
 	_, _ = s.listStateStore.Drop(ctx, migrationID)
 
-	logger.Info().Msg("migration bucket list obj: done")
+	logger.Info().
+		Int("total_objects", objCount).
+		Int("directories_found", dirCount).
+		Int("markers_enqueued", markerCount).
+		Msg("migration bucket list obj: done")
 	return nil
 }
 
