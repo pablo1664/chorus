@@ -41,6 +41,7 @@ type Config struct {
 	QueueUpdateInterval      time.Duration  `yaml:"queueUpdateInterval"`
 	TaskCheckInterval        time.Duration  `yaml:"taskCheckInterval"`
 	DelayedTaskCheckInterval time.Duration  `yaml:"delayedTaskCheckInterval"`
+	RecursiveInitialListing  bool           `yaml:"recursiveInitialListing"`
 	CustomErrRetryInterval   *time.Duration `yaml:"customErrRetryInterval,omitempty"`
 }
 

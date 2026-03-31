@@ -7,6 +7,7 @@ worker:
   switchRetryInterval: 30s
   taskCheckInterval: 1s
   delayedTaskCheckInterval: 3s
+  recursiveInitialListing: false # when true, list objects recursively and avoid prefix fan-out tasks (recommended for very deep S3/Ceph trees)
 lock:
   overlap: 2s
 api:

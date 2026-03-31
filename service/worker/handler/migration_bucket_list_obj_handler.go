@@ -68,7 +68,11 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 		return fmt.Errorf("unable to get last listed object: %w", err)
 	}
 
-	objects := fromClient.S3().ListObjects(ctx, p.Bucket, mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix})
+	listOptions := mclient.ListObjectsOptions{StartAfter: lastObjName, Prefix: p.Prefix}
+	if s.conf != nil && s.conf.RecursiveInitialListing {
+		listOptions.Recursive = true
+	}
+	objects := fromClient.S3().ListObjects(ctx, p.Bucket, listOptions)
 	objCount, dirCount, markerCount := 0, 0, 0
 	for object := range objects {
 		if object.Err != nil {
@@ -98,7 +102,7 @@ func (s *svc) HandleMigrationBucketListObj(ctx context.Context, t *asynq.Task) e
 				}
 			}
 
-			if object.Key != p.Prefix {
+			if !(s.conf != nil && s.conf.RecursiveInitialListing) && object.Key != p.Prefix {
 				subP := p
 				subP.Prefix = object.Key
 				if err = s.queueSvc.EnqueueTask(ctx, subP); err != nil {

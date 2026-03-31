@@ -211,6 +211,9 @@ proxy:
       enabled: false
       endpoint: ""
 
+    worker:
+      recursiveInitialListing: false
+
     cors:
       enabled: false
       allowAll: false
